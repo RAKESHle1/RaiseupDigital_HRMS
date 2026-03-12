@@ -33,7 +33,7 @@ async def get_messages(user_id: str, current_user: dict = Depends(get_current_us
             {"senderId": my_id, "receiverId": user_id},
             {"senderId": user_id, "receiverId": my_id}
         ]
-    }).sort("timestamp", 1)
+    }).sort("timestamp", -1)  # Sort messages in descending order
     async for msg in cursor:
         msg["_id"] = str(msg["_id"])
         messages.append(msg)
