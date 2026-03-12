@@ -12,7 +12,10 @@ import socketio
 # ─── Socket.IO Setup ─────────────────────────────────────
 sio = socketio.AsyncServer(
     async_mode="asgi",
-    cors_allowed_origins="*"
+    cors_allowed_origins=[
+        "https://raiseupdigital-hrms-mnizzmaoz-raiseupdigitalhrms.vercel.app",
+        "http://localhost:3000",
+    ]
 )
 
 # ─── Lifespan (replaces deprecated on_event) ──────────────
@@ -33,7 +36,10 @@ app = FastAPI(
 # ─── CORS ─────────────────────────────────────────────────
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://raiseupdigital-hrms-mnizzsmaoz-raiseupdigitalhrms.vercel.app"],  # Replace "*" with the frontend URL
+    allow_origins=[
+        "https://raiseupdigital-hrms-mnizzmaoz-raiseupdigitalhrms.vercel.app",
+        "http://localhost:3000",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
