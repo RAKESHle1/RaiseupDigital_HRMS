@@ -9,13 +9,17 @@ from routes_chat import router as chat_router
 from routes_notifications import router as notifications_router
 import socketio
 
+# ─── Allowed Origins ──────────────────────────────────────
+ALLOWED_ORIGINS = [
+    "https://raiseupdigital-hrms.vercel.app",
+    "https://raiseupdigital-hrms-mnizzmaoz-raiseupdigitalhrms.vercel.app",
+    "http://localhost:3000",
+]
+
 # ─── Socket.IO Setup ─────────────────────────────────────
 sio = socketio.AsyncServer(
     async_mode="asgi",
-    cors_allowed_origins=[
-        "https://raiseupdigital-hrms-mnizzmaoz-raiseupdigitalhrms.vercel.app",
-        "http://localhost:3000",
-    ]
+    cors_allowed_origins=ALLOWED_ORIGINS
 )
 
 # ─── Lifespan (replaces deprecated on_event) ──────────────
@@ -36,10 +40,7 @@ app = FastAPI(
 # ─── CORS ─────────────────────────────────────────────────
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://raiseupdigital-hrms-mnizzmaoz-raiseupdigitalhrms.vercel.app",
-        "http://localhost:3000",
-    ],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
