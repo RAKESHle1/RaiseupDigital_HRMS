@@ -3,7 +3,8 @@ import { useEffect, useState, useRef } from "react";
 import { chatAPI, usersAPI } from "@/lib/api";
 import { useAuthStore } from "@/lib/store";
 import toast from "react-hot-toast";
-import { FiSend, FiPlus, FiUsers, FiMessageCircle, FiSearch, FiX, FiPhone, FiVideo } from "react-icons/fi";
+import { FiSend, FiPlus, FiUsers, FiMessageCircle, FiSearch, FiX, FiPhone, FiVideo, FiMic, FiMicOff, FiVideoOff, FiPhoneOff, FiUser } from "react-icons/fi";
+import socketService from "@/lib/socket";
 
 export default function EmployeeChatPage() {
   const { user } = useAuthStore();
@@ -21,11 +22,58 @@ export default function EmployeeChatPage() {
   const [tab, setTab] = useState<"chats" | "groups">("chats");
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
+  // WebRTC & Call State
+  const [callStatus, setCallStatus] = useState<"idle" | "calling" | "incoming" | "active">("idle");
+  const [callType, setCallType] = useState<"audio" | "video">("video");
+  const [caller, setCaller] = useState<any>(null);
+  const [localStream, setLocalStream] = useState<MediaStream | null>(null);
+  const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
+  const pc = useRef<RTCPeerConnection | null>(null);
+  const socket = useRef<any>(null);
+  const pendingOffer = useRef<any>(null);
+  const localVideoRef = useRef<HTMLVideoElement>(null);
+  const remoteVideoRef = useRef<HTMLVideoElement>(null);
+
   useEffect(() => {
     fetchData();
+    
+    // Initialize Socket
+    socket.current = socketService.connect();
+    if (user?.id) {
+      socket.current.emit("join_room", { room: user.id });
+    }
+
+    socket.current.on("incoming_call", (data: any) => {
+      setCaller(data.from);
+      setCallType(data.type);
+      pendingOffer.current = data.offer;
+      setCallStatus("incoming");
+    });
+
+    socket.current.on("call_accepted", async (data: any) => {
+      await pc.current?.setRemoteDescription(new RTCSessionDescription(data.answer));
+      setCallStatus("active");
+    });
+
+    socket.current.on("ice_candidate", async (data: any) => {
+      if (data.candidate) {
+        await pc.current?.addIceCandidate(new RTCIceCandidate(data.candidate));
+      }
+    });
+
+    socket.current.on("call_ended", () => {
+      endCall();
+    });
+
     const interval = setInterval(fetchData, 5000); // Poll every 5s
-    return () => clearInterval(interval);
-  }, []);
+    return () => {
+      clearInterval(interval);
+      socket.current?.off("incoming_call");
+      socket.current?.off("call_accepted");
+      socket.current?.off("ice_candidate");
+      socket.current?.off("call_ended");
+    };
+  }, [user]);
 
   useEffect(() => {
     if (activeChat) {
@@ -38,6 +86,18 @@ export default function EmployeeChatPage() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  useEffect(() => {
+    if (localVideoRef.current && localStream) {
+      localVideoRef.current.srcObject = localStream;
+    }
+  }, [localStream]);
+
+  useEffect(() => {
+    if (remoteVideoRef.current && remoteStream) {
+      remoteVideoRef.current.srcObject = remoteStream;
+    }
+  }, [remoteStream]);
 
   const fetchData = async () => {
     try {
@@ -116,6 +176,89 @@ export default function EmployeeChatPage() {
   const filteredUsers = allUsers.filter((u) =>
     u.name?.toLowerCase().includes(search.toLowerCase())
   );
+
+  // ─── Call Logic ──────────────────────────────────────────
+  const initPeerConnection = () => {
+    pc.current = new RTCPeerConnection({
+      iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+    });
+
+    pc.current.onicecandidate = (event) => {
+      if (event.candidate) {
+        socket.current.emit("ice_candidate", {
+          candidate: event.candidate,
+          to: callStatus === "calling" ? activeChat.userId : caller.id
+        });
+      }
+    };
+
+    pc.current.ontrack = (event) => {
+      setRemoteStream(event.streams[0]);
+    };
+  };
+
+  const startCall = async (type: "audio" | "video") => {
+    setCallType(type);
+    setCallStatus("calling");
+    initPeerConnection();
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        audio: true, 
+        video: type === "video" 
+      });
+      setLocalStream(stream);
+      stream.getTracks().forEach(track => pc.current?.addTrack(track, stream));
+
+      const offer = await pc.current?.createOffer();
+      await pc.current?.setLocalDescription(offer);
+
+      socket.current.emit("call_user", {
+        to: activeChat.userId || activeChat._id,
+        type,
+        offer,
+        from: { id: user?.id, name: user?.name, profilePhoto: user?.profilePhoto }
+      });
+    } catch (err) {
+      toast.error("Could not access camera/microphone");
+      setCallStatus("idle");
+    }
+  };
+
+  const acceptCall = async () => {
+    initPeerConnection();
+    setCallStatus("active");
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        audio: true, 
+        video: callType === "video" 
+      });
+      setLocalStream(stream);
+      stream.getTracks().forEach(track => pc.current?.addTrack(track, stream));
+
+      await pc.current?.setRemoteDescription(new RTCSessionDescription(pendingOffer.current));
+      const answer = await pc.current?.createAnswer();
+      await pc.current?.setLocalDescription(answer);
+
+      socket.current.emit("call_accepted", {
+        to: caller.id,
+        answer
+      });
+    } catch (err) {
+      toast.error("Could not access camera/microphone");
+      endCall();
+    }
+  };
+
+  const endCall = () => {
+    localStream?.getTracks().forEach(track => track.stop());
+    setLocalStream(null);
+    setRemoteStream(null);
+    pc.current?.close();
+    setCallStatus("idle");
+    socket.current.emit("call_ended", { to: activeChat?.userId || caller?.id });
+  };
 
   return (
     <div style={{ height: "calc(100vh - 64px)", display: "flex", gap: 0 }}>
@@ -280,16 +423,22 @@ export default function EmployeeChatPage() {
                 </div>
               </div>
               <div style={{ display: "flex", gap: 8 }}>
-                <button style={{
-                  background: "rgba(34,197,94,0.1)", border: "1px solid rgba(34,197,94,0.2)",
-                  borderRadius: 10, padding: 10, cursor: "pointer", color: "#22c55e",
-                }}>
+                <button 
+                  onClick={() => startCall("audio")}
+                  style={{
+                    background: "rgba(34,197,94,0.1)", border: "1px solid rgba(34,197,94,0.2)",
+                    borderRadius: 10, padding: 10, cursor: "pointer", color: "#22c55e",
+                  }}
+                >
                   <FiPhone size={16} />
                 </button>
-                <button style={{
-                  background: "rgba(99,102,241,0.1)", border: "1px solid rgba(99,102,241,0.2)",
-                  borderRadius: 10, padding: 10, cursor: "pointer", color: "#818cf8",
-                }}>
+                <button 
+                  onClick={() => startCall("video")}
+                  style={{
+                    background: "rgba(99,102,241,0.1)", border: "1px solid rgba(99,102,241,0.2)",
+                    borderRadius: 10, padding: 10, cursor: "pointer", color: "#818cf8",
+                  }}
+                >
                   <FiVideo size={16} />
                 </button>
               </div>
@@ -461,6 +610,96 @@ export default function EmployeeChatPage() {
               </button>
               <button onClick={createGroup} className="gradient-btn">Create Group</button>
             </div>
+          </div>
+        </div>
+      )}
+      {/* Call UI */}
+      {callStatus !== "idle" && (
+        <div className="modal-overlay" style={{ zIndex: 1000, background: "rgba(15,15,26,0.95)" }}>
+          <div style={{ textAlign: "center", width: "100%", maxWidth: 1000 }}>
+            {callStatus === "incoming" ? (
+              <div className="glass-card" style={{ padding: 40, width: 320, margin: "0 auto" }}>
+                <div style={{
+                  width: 80, height: 80, borderRadius: 20, margin: "0 auto 20px",
+                  background: "linear-gradient(135deg, #6366f1, #8b5cf6)",
+                  display: "flex", alignItems: "center", justifyContent: "center"
+                }}>
+                   <FiUser size={40} color="white" />
+                </div>
+                <h3 style={{ fontSize: 18, fontWeight: 700, marginBottom: 8 }}>{caller?.name}</h3>
+                <p style={{ color: "var(--text-muted)", marginBottom: 32 }}>Incoming {callType} call...</p>
+                <div style={{ display: "flex", gap: 16, justifyContent: "center" }}>
+                  <button onClick={acceptCall} style={{
+                    width: 56, height: 56, borderRadius: "50%", background: "#22c55e", border: "none", cursor: "pointer",
+                    display: "flex", alignItems: "center", justifyContent: "center", color: "white"
+                  }}>
+                    <FiPhone size={24} />
+                  </button>
+                  <button onClick={endCall} style={{
+                    width: 56, height: 56, borderRadius: "50%", background: "#ef4444", border: "none", cursor: "pointer",
+                    display: "flex", alignItems: "center", justifyContent: "center", color: "white"
+                  }}>
+                    <FiPhoneOff size={24} />
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", height: "80vh", gap: 20 }}>
+                <div style={{ flex: 1, display: "flex", gap: 20, padding: 20 }}>
+                   {/* Remote Video */}
+                   <div style={{ flex: 1, position: "relative", background: "#000", borderRadius: 20, overflow: "hidden" }}>
+                      <video 
+                        ref={remoteVideoRef} 
+                        autoPlay 
+                        playsInline 
+                        style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                      />
+                      {!remoteStream && (
+                        <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 12 }}>
+                           <div className="spin" style={{ width: 40, height: 40, border: "4px solid rgba(255,255,255,0.1)", borderTopColor: "#6366f1", borderRadius: "50%" }} />
+                           <p style={{ color: "white", fontSize: 14 }}>Connecting to {activeChat?.name || caller?.name}...</p>
+                        </div>
+                      )}
+                      
+                      {/* Local Mini Video */}
+                      <div style={{ 
+                        position: "absolute", bottom: 20, right: 20, width: 200, height: 150, 
+                        background: "#222", borderRadius: 12, overflow: "hidden", border: "2px solid rgba(255,255,255,0.2)" 
+                      }}>
+                        <video 
+                          ref={localVideoRef} 
+                          autoPlay 
+                          muted 
+                          playsInline 
+                          style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                        />
+                      </div>
+                   </div>
+                </div>
+
+                {/* Controls */}
+                <div style={{ padding: "0 0 40px", display: "flex", justifyContent: "center", gap: 20 }}>
+                   <button onClick={() => {}} style={{
+                      width: 56, height: 56, borderRadius: "50%", background: "rgba(255,255,255,0.1)", border: "1px solid rgba(255,255,255,0.2)", cursor: "pointer",
+                      display: "flex", alignItems: "center", justifyContent: "center", color: "white"
+                   }}>
+                      <FiMic size={24} />
+                   </button>
+                   <button onClick={() => {}} style={{
+                      width: 56, height: 56, borderRadius: "50%", background: "rgba(255,255,255,0.1)", border: "1px solid rgba(255,255,255,0.2)", cursor: "pointer",
+                      display: "flex", alignItems: "center", justifyContent: "center", color: "white"
+                   }}>
+                      <FiVideo size={24} />
+                   </button>
+                   <button onClick={endCall} style={{
+                      width: 56, height: 56, borderRadius: "50%", background: "#ef4444", border: "none", cursor: "pointer",
+                      display: "flex", alignItems: "center", justifyContent: "center", color: "white"
+                   }}>
+                      <FiPhoneOff size={24} />
+                   </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
