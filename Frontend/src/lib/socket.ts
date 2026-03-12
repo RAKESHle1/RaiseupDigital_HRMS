@@ -8,7 +8,11 @@ class SocketService {
   connect() {
     if (!this.socket) {
       this.socket = io(SOCKET_URL, {
-        transports: ["websocket"],
+        transports: ["polling"],  // polling only - no websocket on Render free tier
+        withCredentials: true,
+        reconnection: true,
+        reconnectionAttempts: 5,
+        reconnectionDelay: 1000,
       });
 
       this.socket.on("connect", () => {
@@ -17,6 +21,10 @@ class SocketService {
 
       this.socket.on("disconnect", () => {
         console.log("Disconnected from socket server");
+      });
+
+      this.socket.on("connect_error", (error) => {
+        console.log("Connection error:", error);
       });
     }
     return this.socket;
