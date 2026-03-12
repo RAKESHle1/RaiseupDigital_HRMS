@@ -62,7 +62,9 @@ export default function EmployeeChatPage() {
       } else {
         res = await chatAPI.getGroupMessages(currentChat._id);
       }
-      setMessages(res.data);
+      // Sort messages by timestamp before setting them
+      const sortedMessages = res.data.sort((a: any, b: any) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+      setMessages(sortedMessages);
     } catch (err) {
       console.error("fetchMessages error:", err);
     }
