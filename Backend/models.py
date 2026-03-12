@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, ConfigDict
 from typing import Optional
 from datetime import datetime, date
 from enum import Enum
@@ -55,6 +55,8 @@ class UserUpdate(BaseModel):
     isActive: Optional[bool] = None
 
 class UserResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     id: str = Field(alias="_id")
     employeeId: str
     name: str
@@ -67,9 +69,6 @@ class UserResponse(BaseModel):
     profilePhoto: str = ""
     role: str
     isActive: bool = True
-
-    class Config:
-        populate_by_name = True
 
 class UserLogin(BaseModel):
     email: EmailStr
@@ -86,6 +85,8 @@ class ClockOutRequest(BaseModel):
     clockOutTime: Optional[str] = None
 
 class AttendanceResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     id: str = Field(alias="_id")
     employeeId: str
     employeeName: Optional[str] = ""
@@ -94,9 +95,6 @@ class AttendanceResponse(BaseModel):
     clockOut: Optional[str] = None
     workingHours: Optional[float] = 0
     status: str = "absent"
-
-    class Config:
-        populate_by_name = True
 
 
 # ─── Leave Models ─────────────────────────────────────────
@@ -110,6 +108,8 @@ class LeaveUpdate(BaseModel):
     status: LeaveStatus
 
 class LeaveResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     id: str = Field(alias="_id")
     employeeId: str
     employeeName: Optional[str] = ""
@@ -120,9 +120,6 @@ class LeaveResponse(BaseModel):
     status: str = "pending"
     appliedDate: str = ""
 
-    class Config:
-        populate_by_name = True
-
 
 # ─── Message Models ───────────────────────────────────────
 class MessageCreate(BaseModel):
@@ -131,6 +128,8 @@ class MessageCreate(BaseModel):
     message: str
 
 class MessageResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     id: str = Field(alias="_id")
     senderId: str
     senderName: Optional[str] = ""
@@ -138,9 +137,6 @@ class MessageResponse(BaseModel):
     groupId: Optional[str] = None
     message: str
     timestamp: str
-
-    class Config:
-        populate_by_name = True
 
 
 # ─── Group Models ─────────────────────────────────────────
@@ -150,15 +146,14 @@ class GroupCreate(BaseModel):
     description: str = ""
 
 class GroupResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     id: str = Field(alias="_id")
     name: str
     members: list[str] = []
     description: str = ""
     createdBy: str = ""
     createdAt: str = ""
-
-    class Config:
-        populate_by_name = True
 
 
 # ─── Token Models ─────────────────────────────────────────

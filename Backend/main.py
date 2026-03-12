@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
 from database import connect_db, close_db
 from routes_users import router as users_router
 from routes_attendance import router as attendance_router
@@ -14,11 +15,19 @@ sio = socketio.AsyncServer(
     cors_allowed_origins="*"
 )
 
+# ─── Lifespan (replaces deprecated on_event) ──────────────
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await connect_db()
+    yield
+    await close_db()
+
 # ─── FastAPI App ──────────────────────────────────────────
 app = FastAPI(
     title="HRMS Portal API",
     description="Human Resource Management System API",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 # ─── CORS ─────────────────────────────────────────────────
@@ -36,17 +45,6 @@ app.include_router(attendance_router)
 app.include_router(leaves_router)
 app.include_router(chat_router)
 app.include_router(notifications_router)
-
-
-# ─── Lifecycle Events ────────────────────────────────────
-@app.on_event("startup")
-async def startup():
-    await connect_db()
-
-@app.on_event("shutdown")
-async def shutdown():
-    await close_db()
-
 
 # ─── Health Check ─────────────────────────────────────────
 @app.get("/")
@@ -94,7 +92,7 @@ async def handle_typing(sid, data):
     if room:
         await sio.emit("user_typing", data, room=room, skip_sid=sid)
 
-# WebRTC Signaling
+# ─── WebRTC Signaling ────────────────────────────────────
 @sio.on("call_user")
 async def call_user(sid, data):
     await sio.emit("incoming_call", data, room=data.get("to"))
