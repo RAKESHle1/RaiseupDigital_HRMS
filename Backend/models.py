@@ -78,10 +78,12 @@ class UserLogin(BaseModel):
 
 # ─── Attendance Models ────────────────────────────────────
 class ClockInRequest(BaseModel):
-    pass
+    employeeId: str
+    clockInTime: Optional[str] = None
 
 class ClockOutRequest(BaseModel):
-    pass
+    employeeId: str
+    clockOutTime: Optional[str] = None
 
 class AttendanceResponse(BaseModel):
     id: str = Field(alias="_id")
