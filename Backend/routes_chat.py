@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, Depends
 from bson import ObjectId
-from datetime import datetime
+from datetime import datetime, timezone
 from database import messages_collection, groups_collection, users_collection
 from models import MessageCreate, GroupCreate
 from auth import get_current_user, get_admin_user
@@ -17,9 +17,8 @@ async def send_message(msg: MessageCreate, current_user: dict = Depends(get_curr
         "receiverId": msg.receiverId,
         "groupId": msg.groupId,
         "message": msg.message,
-        "timestamp": datetime.now().isoformat()
+        "timestamp": datetime.now(timezone.utc).isoformat()
     }
-    
     result = await messages_collection.insert_one(message_doc)
     message_doc["_id"] = str(result.inserted_id)
     return message_doc
@@ -27,9 +26,7 @@ async def send_message(msg: MessageCreate, current_user: dict = Depends(get_curr
 
 @router.get("/messages/{user_id}")
 async def get_messages(user_id: str, current_user: dict = Depends(get_current_user)):
-    """Get conversation between current user and another user."""
     my_id = str(current_user["_id"])
-    
     messages = []
     cursor = messages_collection.find({
         "$or": [
@@ -37,20 +34,15 @@ async def get_messages(user_id: str, current_user: dict = Depends(get_current_us
             {"senderId": user_id, "receiverId": my_id}
         ]
     }).sort("timestamp", 1)
-    
     async for msg in cursor:
         msg["_id"] = str(msg["_id"])
         messages.append(msg)
-    
     return messages
 
 
 @router.get("/conversations")
 async def get_conversations(current_user: dict = Depends(get_current_user)):
-    """Get list of users the current user has chatted with."""
     my_id = str(current_user["_id"])
-    
-    # Find unique conversation partners
     pipeline = [
         {"$match": {
             "$or": [{"senderId": my_id}, {"receiverId": my_id}],
@@ -70,10 +62,8 @@ async def get_conversations(current_user: dict = Depends(get_current_user)):
             "senderName": {"$first": "$senderName"}
         }}
     ]
-    
     conversations = []
     async for conv in messages_collection.aggregate(pipeline):
-        # Get user details
         user = await users_collection.find_one({"_id": ObjectId(conv["_id"])})
         if user:
             conversations.append({
@@ -83,7 +73,6 @@ async def get_conversations(current_user: dict = Depends(get_current_user)):
                 "lastMessage": conv["lastMessage"],
                 "lastTimestamp": conv["lastTimestamp"]
             })
-    
     return conversations
 
 
@@ -92,12 +81,9 @@ async def get_conversations(current_user: dict = Depends(get_current_user)):
 async def create_group(group: GroupCreate, current_user: dict = Depends(get_current_user)):
     group_doc = group.model_dump()
     group_doc["createdBy"] = str(current_user["_id"])
-    group_doc["createdAt"] = datetime.now().isoformat()
-    
-    # Add creator to members
+    group_doc["createdAt"] = datetime.now(timezone.utc).isoformat()
     if str(current_user["_id"]) not in group_doc["members"]:
         group_doc["members"].append(str(current_user["_id"]))
-    
     result = await groups_collection.insert_one(group_doc)
     group_doc["_id"] = str(result.inserted_id)
     return group_doc
@@ -151,9 +137,8 @@ async def send_group_message(group_id: str, msg: MessageCreate, current_user: di
         "receiverId": None,
         "groupId": group_id,
         "message": msg.message,
-        "timestamp": datetime.now().isoformat()
+        "timestamp": datetime.now(timezone.utc).isoformat()
     }
-    
     result = await messages_collection.insert_one(message_doc)
     message_doc["_id"] = str(result.inserted_id)
     return message_doc
@@ -175,10 +160,8 @@ async def add_group_member(group_id: str, member_id: str, current_user: dict = D
 async def get_chat_stats(admin: dict = Depends(get_admin_user)):
     total_messages = await messages_collection.count_documents({})
     total_groups = await groups_collection.count_documents({})
-    
-    # Active users (sent a message in last 24 hours)
     from datetime import timedelta
-    yesterday = (datetime.now() - timedelta(hours=24)).isoformat()
+    yesterday = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
     active_pipeline = [
         {"$match": {"timestamp": {"$gte": yesterday}}},
         {"$group": {"_id": "$senderId"}},
@@ -187,7 +170,6 @@ async def get_chat_stats(admin: dict = Depends(get_admin_user)):
     active_count = 0
     async for result in messages_collection.aggregate(active_pipeline):
         active_count = result["count"]
-    
     return {
         "totalMessages": total_messages,
         "totalGroups": total_groups,
