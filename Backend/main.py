@@ -33,7 +33,7 @@ app = FastAPI(
 # ─── CORS ─────────────────────────────────────────────────
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["https://raiseupdigital-hrms-mnizzsmaoz-raiseupdigitalhrms.vercel.app"],  # Replace "*" with the frontend URL
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
