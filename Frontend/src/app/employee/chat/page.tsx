@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import { chatAPI, usersAPI } from "@/lib/api";
 import { useAuthStore } from "@/lib/store";
 import toast from "react-hot-toast";
@@ -23,6 +23,10 @@ export default function EmployeeChatPage() {
   const [sending, setSending] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
+  // ─── Refs to avoid stale closures ─────────────────────
+  const activeChatRef = useRef<any>(null);
+  const chatTypeRef = useRef<"dm" | "group">("dm");
+
   // WebRTC & Call State
   const [callStatus, setCallStatus] = useState<"idle" | "calling" | "incoming" | "active">("idle");
   const [callType, setCallType] = useState<"audio" | "video">("video");
@@ -35,18 +39,59 @@ export default function EmployeeChatPage() {
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
 
+  // ─── Keep refs in sync with state ─────────────────────
+  useEffect(() => {
+    activeChatRef.current = activeChat;
+  }, [activeChat]);
+
+  useEffect(() => {
+    chatTypeRef.current = chatType;
+  }, [chatType]);
+
+  // ─── fetchMessages uses refs (no stale closure) ────────
+  const fetchMessages = useCallback(async (chatOverride?: any, typeOverride?: string) => {
+    const currentChat = chatOverride || activeChatRef.current;
+    const currentType = typeOverride || chatTypeRef.current;
+    if (!currentChat) return;
+    try {
+      let res;
+      if (currentType === "dm") {
+        const id = currentChat.userId || currentChat._id;
+        if (!id) return;
+        res = await chatAPI.getMessages(id);
+      } else {
+        res = await chatAPI.getGroupMessages(currentChat._id);
+      }
+      setMessages(res.data);
+    } catch (err) {
+      console.error("fetchMessages error:", err);
+    }
+  }, []);
+
+  const fetchData = useCallback(async () => {
+    try {
+      const [convRes, groupsRes, usersRes] = await Promise.all([
+        chatAPI.getConversations(),
+        chatAPI.getMyGroups(),
+        usersAPI.getAll(),
+      ]);
+      setConversations(convRes.data);
+      setGroups(groupsRes.data);
+      setAllUsers(usersRes.data.filter((u: any) => u._id !== user?.id));
+    } catch (err) {
+      console.error("fetchData error:", err);
+    }
+  }, [user]);
+
   useEffect(() => {
     fetchData();
-
-    // Initialize Socket
     socket.current = socketService.connect();
     if (user?.id) {
       socket.current.emit("join_room", { room: user.id });
     }
 
-    socket.current.on("new_message", (data: any) => {
-      // Real-time message: refresh messages if chat is active
-      fetchMessages();
+    socket.current.on("new_message", () => {
+      fetchMessages(); // now uses ref — no stale closure
     });
 
     socket.current.on("incoming_call", (data: any) => {
@@ -67,9 +112,7 @@ export default function EmployeeChatPage() {
       }
     });
 
-    socket.current.on("call_ended", () => {
-      endCall();
-    });
+    socket.current.on("call_ended", () => endCall());
 
     const interval = setInterval(fetchData, 5000);
     return () => {
@@ -80,12 +123,12 @@ export default function EmployeeChatPage() {
       socket.current?.off("ice_candidate");
       socket.current?.off("call_ended");
     };
-  }, [user]);
+  }, [user, fetchData, fetchMessages]);
 
   useEffect(() => {
     if (activeChat) {
-      fetchMessages();
-      const interval = setInterval(fetchMessages, 3000);
+      fetchMessages(activeChat, chatType);
+      const interval = setInterval(() => fetchMessages(), 3000);
       return () => clearInterval(interval);
     }
   }, [activeChat, chatType]);
@@ -95,99 +138,47 @@ export default function EmployeeChatPage() {
   }, [messages]);
 
   useEffect(() => {
-    if (localVideoRef.current && localStream) {
-      localVideoRef.current.srcObject = localStream;
-    }
+    if (localVideoRef.current && localStream) localVideoRef.current.srcObject = localStream;
   }, [localStream]);
 
   useEffect(() => {
-    if (remoteVideoRef.current && remoteStream) {
-      remoteVideoRef.current.srcObject = remoteStream;
-    }
+    if (remoteVideoRef.current && remoteStream) remoteVideoRef.current.srcObject = remoteStream;
   }, [remoteStream]);
-
-  const fetchData = async () => {
-    try {
-      const [convRes, groupsRes, usersRes] = await Promise.all([
-        chatAPI.getConversations(),
-        chatAPI.getMyGroups(),
-        usersAPI.getAll(),
-      ]);
-      setConversations(convRes.data);
-      setGroups(groupsRes.data);
-      setAllUsers(usersRes.data.filter((u: any) => u._id !== user?.id));
-    } catch (err) {
-      console.error("fetchData error:", err);
-    }
-  };
-
-  const fetchMessages = async () => {
-    if (!activeChat) return;
-    try {
-      let res;
-      if (chatType === "dm") {
-        const id = activeChat.userId || activeChat._id;
-        if (!id) return;
-        res = await chatAPI.getMessages(id);
-      } else {
-        res = await chatAPI.getGroupMessages(activeChat._id);
-      }
-      setMessages(res.data);
-    } catch (err) {
-      console.error("fetchMessages error:", err);
-    }
-  };
 
   const sendMessage = async () => {
     if (!newMessage.trim() || !activeChat || sending) return;
-
     const messageText = newMessage.trim();
-    setNewMessage(""); // Clear immediately for better UX
+    setNewMessage("");
     setSending(true);
-
     try {
       if (chatType === "dm") {
         const receiverId = activeChat.userId || activeChat._id;
-        if (!receiverId) {
-          toast.error("No recipient selected");
-          setNewMessage(messageText);
-          return;
-        }
-        await chatAPI.sendMessage({
-          receiverId,
-          message: messageText,
-        });
+        if (!receiverId) { toast.error("No recipient selected"); setNewMessage(messageText); return; }
+        await chatAPI.sendMessage({ receiverId, message: messageText });
       } else {
-        await chatAPI.sendGroupMessage(activeChat._id, {
-          message: messageText,
-        });
+        await chatAPI.sendGroupMessage(activeChat._id, { message: messageText });
       }
-      await fetchMessages(); // Refresh messages immediately after sending
-      await fetchData();     // Refresh conversation list
+      await fetchMessages();
+      await fetchData();
     } catch (err: any) {
       console.error("sendMessage error:", err);
       toast.error(err?.response?.data?.detail || "Failed to send message");
-      setNewMessage(messageText); // Restore message if failed
+      setNewMessage(messageText);
     } finally {
       setSending(false);
     }
   };
 
   const startNewChat = (targetUser: any) => {
-    setActiveChat({
-      userId: targetUser._id,
-      name: targetUser.name,
-      profilePhoto: targetUser.profilePhoto,
-    });
+    const chat = { userId: targetUser._id, name: targetUser.name, profilePhoto: targetUser.profilePhoto };
+    setActiveChat(chat);
     setChatType("dm");
     setShowNewChat(false);
+    fetchMessages(chat, "dm");
   };
 
   const createGroup = async () => {
-    if (!groupForm.name) {
-      toast.error("Group name required");
-      return;
-    }
+    if (!groupForm.name) { toast.error("Group name required"); return; }
     try {
       await chatAPI.createGroup(groupForm);
       toast.success("Group created!");
@@ -199,52 +190,27 @@ export default function EmployeeChatPage() {
     }
   };
 
-  const filteredUsers = allUsers.filter((u) =>
-    u.name?.toLowerCase().includes(search.toLowerCase())
-  );
+  const filteredUsers = allUsers.filter((u) => u.name?.toLowerCase().includes(search.toLowerCase()));
 
-  // ─── Call Logic ──────────────────────────────────────────
   const initPeerConnection = () => {
-    pc.current = new RTCPeerConnection({
-      iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
-    });
-
+    pc.current = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
     pc.current.onicecandidate = (event) => {
       if (event.candidate) {
-        socket.current.emit("ice_candidate", {
-          candidate: event.candidate,
-          to: callStatus === "calling" ? activeChat.userId : caller.id,
-        });
+        socket.current.emit("ice_candidate", { candidate: event.candidate, to: callStatus === "calling" ? activeChat.userId : caller.id });
       }
     };
-
-    pc.current.ontrack = (event) => {
-      setRemoteStream(event.streams[0]);
-    };
+    pc.current.ontrack = (event) => setRemoteStream(event.streams[0]);
   };
 
   const startCall = async (type: "audio" | "video") => {
-    setCallType(type);
-    setCallStatus("calling");
-    initPeerConnection();
-
+    setCallType(type); setCallStatus("calling"); initPeerConnection();
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: true,
-        video: type === "video",
-      });
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: type === "video" });
       setLocalStream(stream);
       stream.getTracks().forEach((track) => pc.current?.addTrack(track, stream));
-
       const offer = await pc.current?.createOffer();
       await pc.current?.setLocalDescription(offer);
-
-      socket.current.emit("call_user", {
-        to: activeChat.userId || activeChat._id,
-        type,
-        offer,
-        from: { id: user?.id, name: user?.name, profilePhoto: user?.profilePhoto },
-      });
+      socket.current.emit("call_user", { to: activeChat.userId || activeChat._id, type, offer, from: { id: user?.id, name: user?.name, profilePhoto: user?.profilePhoto } });
     } catch (err) {
       toast.error("Could not access camera/microphone");
       setCallStatus("idle");
@@ -252,21 +218,14 @@ export default function EmployeeChatPage() {
   };
 
   const acceptCall = async () => {
-    initPeerConnection();
-    setCallStatus("active");
-
+    initPeerConnection(); setCallStatus("active");
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: true,
-        video: callType === "video",
-      });
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: callType === "video" });
       setLocalStream(stream);
       stream.getTracks().forEach((track) => pc.current?.addTrack(track, stream));
-
       await pc.current?.setRemoteDescription(new RTCSessionDescription(pendingOffer.current));
       const answer = await pc.current?.createAnswer();
       await pc.current?.setLocalDescription(answer);
-
       socket.current.emit("call_accepted", { to: caller.id, answer });
     } catch (err) {
       toast.error("Could not access camera/microphone");
@@ -276,104 +235,49 @@ export default function EmployeeChatPage() {
 
   const endCall = () => {
     localStream?.getTracks().forEach((track) => track.stop());
-    setLocalStream(null);
-    setRemoteStream(null);
-    pc.current?.close();
-    setCallStatus("idle");
+    setLocalStream(null); setRemoteStream(null); pc.current?.close(); setCallStatus("idle");
     socket.current.emit("call_ended", { to: activeChat?.userId || caller?.id });
   };
 
   return (
     <div style={{ height: "calc(100vh - 64px)", display: "flex", gap: 0 }}>
       {/* Left Panel */}
-      <div style={{
-        width: 320, minWidth: 320, borderRight: "1px solid var(--border-color)",
-        display: "flex", flexDirection: "column", background: "rgba(15,15,26,0.5)",
-        borderRadius: "16px 0 0 16px", overflow: "hidden",
-      }}>
+      <div style={{ width: 320, minWidth: 320, borderRight: "1px solid var(--border-color)", display: "flex", flexDirection: "column", background: "rgba(15,15,26,0.5)", borderRadius: "16px 0 0 16px", overflow: "hidden" }}>
         <div style={{ padding: "20px 16px", borderBottom: "1px solid var(--border-color)" }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
             <h2 style={{ fontSize: 18, fontWeight: 700 }}>Messages</h2>
             <div style={{ display: "flex", gap: 8 }}>
-              <button onClick={() => setShowNewChat(true)} style={{
-                background: "rgba(99,102,241,0.1)", border: "1px solid rgba(99,102,241,0.2)",
-                borderRadius: 8, padding: 6, cursor: "pointer", color: "#818cf8",
-              }}>
-                <FiPlus size={16} />
-              </button>
-              <button onClick={() => setShowNewGroup(true)} style={{
-                background: "rgba(139,92,246,0.1)", border: "1px solid rgba(139,92,246,0.2)",
-                borderRadius: 8, padding: 6, cursor: "pointer", color: "#a855f7",
-              }}>
-                <FiUsers size={16} />
-              </button>
+              <button onClick={() => setShowNewChat(true)} style={{ background: "rgba(99,102,241,0.1)", border: "1px solid rgba(99,102,241,0.2)", borderRadius: 8, padding: 6, cursor: "pointer", color: "#818cf8" }}><FiPlus size={16} /></button>
+              <button onClick={() => setShowNewGroup(true)} style={{ background: "rgba(139,92,246,0.1)", border: "1px solid rgba(139,92,246,0.2)", borderRadius: 8, padding: 6, cursor: "pointer", color: "#a855f7" }}><FiUsers size={16} /></button>
             </div>
           </div>
           <div style={{ display: "flex", background: "rgba(99,102,241,0.06)", borderRadius: 8, overflow: "hidden" }}>
-            <button onClick={() => setTab("chats")} style={{
-              flex: 1, padding: "8px", border: "none", cursor: "pointer", fontWeight: 500, fontSize: 13,
-              background: tab === "chats" ? "linear-gradient(135deg, #6366f1, #8b5cf6)" : "transparent",
-              color: tab === "chats" ? "white" : "var(--text-secondary)",
-            }}>Chats</button>
-            <button onClick={() => setTab("groups")} style={{
-              flex: 1, padding: "8px", border: "none", cursor: "pointer", fontWeight: 500, fontSize: 13,
-              background: tab === "groups" ? "linear-gradient(135deg, #6366f1, #8b5cf6)" : "transparent",
-              color: tab === "groups" ? "white" : "var(--text-secondary)",
-            }}>Groups</button>
+            <button onClick={() => setTab("chats")} style={{ flex: 1, padding: "8px", border: "none", cursor: "pointer", fontWeight: 500, fontSize: 13, background: tab === "chats" ? "linear-gradient(135deg, #6366f1, #8b5cf6)" : "transparent", color: tab === "chats" ? "white" : "var(--text-secondary)" }}>Chats</button>
+            <button onClick={() => setTab("groups")} style={{ flex: 1, padding: "8px", border: "none", cursor: "pointer", fontWeight: 500, fontSize: 13, background: tab === "groups" ? "linear-gradient(135deg, #6366f1, #8b5cf6)" : "transparent", color: tab === "groups" ? "white" : "var(--text-secondary)" }}>Groups</button>
           </div>
         </div>
-
         <div style={{ flex: 1, overflowY: "auto", padding: 8 }}>
           {tab === "chats" ? (
             conversations.length === 0 ? (
-              <p style={{ textAlign: "center", padding: 24, color: "var(--text-muted)", fontSize: 13 }}>
-                No conversations yet. Start a new chat!
-              </p>
+              <p style={{ textAlign: "center", padding: 24, color: "var(--text-muted)", fontSize: 13 }}>No conversations yet. Start a new chat!</p>
             ) : (
               conversations.map((conv) => (
-                <button key={conv.userId} onClick={() => { setActiveChat(conv); setChatType("dm"); }} style={{
-                  width: "100%", padding: "12px", display: "flex", alignItems: "center", gap: 12,
-                  border: "none", borderRadius: 10, cursor: "pointer", marginBottom: 4,
-                  background: activeChat?.userId === conv.userId ? "rgba(99,102,241,0.12)" : "transparent",
-                  textAlign: "left",
-                }}>
-                  <div style={{
-                    width: 40, height: 40, borderRadius: 10,
-                    background: "linear-gradient(135deg, #6366f1, #8b5cf6)",
-                    display: "flex", alignItems: "center", justifyContent: "center",
-                    fontSize: 14, fontWeight: 700, color: "white", flexShrink: 0,
-                  }}>
-                    {conv.name?.slice(0, 2).toUpperCase()}
-                  </div>
+                <button key={conv.userId} onClick={() => { setActiveChat(conv); setChatType("dm"); }} style={{ width: "100%", padding: "12px", display: "flex", alignItems: "center", gap: 12, border: "none", borderRadius: 10, cursor: "pointer", marginBottom: 4, background: activeChat?.userId === conv.userId ? "rgba(99,102,241,0.12)" : "transparent", textAlign: "left" }}>
+                  <div style={{ width: 40, height: 40, borderRadius: 10, background: "linear-gradient(135deg, #6366f1, #8b5cf6)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14, fontWeight: 700, color: "white", flexShrink: 0 }}>{conv.name?.slice(0, 2).toUpperCase()}</div>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <p style={{ fontWeight: 600, fontSize: 14, color: "var(--text-primary)" }}>{conv.name}</p>
-                    <p style={{ fontSize: 12, color: "var(--text-muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                      {conv.lastMessage}
-                    </p>
+                    <p style={{ fontSize: 12, color: "var(--text-muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{conv.lastMessage}</p>
                   </div>
                 </button>
               ))
             )
           ) : (
             groups.length === 0 ? (
-              <p style={{ textAlign: "center", padding: 24, color: "var(--text-muted)", fontSize: 13 }}>
-                No groups yet. Create one!
-              </p>
+              <p style={{ textAlign: "center", padding: 24, color: "var(--text-muted)", fontSize: 13 }}>No groups yet. Create one!</p>
             ) : (
               groups.map((group) => (
-                <button key={group._id} onClick={() => { setActiveChat(group); setChatType("group"); }} style={{
-                  width: "100%", padding: "12px", display: "flex", alignItems: "center", gap: 12,
-                  border: "none", borderRadius: 10, cursor: "pointer", marginBottom: 4,
-                  background: activeChat?._id === group._id && chatType === "group" ? "rgba(99,102,241,0.12)" : "transparent",
-                  textAlign: "left",
-                }}>
-                  <div style={{
-                    width: 40, height: 40, borderRadius: 10,
-                    background: "linear-gradient(135deg, #8b5cf6, #a855f7)",
-                    display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
-                  }}>
-                    <FiUsers size={18} color="white" />
-                  </div>
+                <button key={group._id} onClick={() => { setActiveChat(group); setChatType("group"); }} style={{ width: "100%", padding: "12px", display: "flex", alignItems: "center", gap: 12, border: "none", borderRadius: 10, cursor: "pointer", marginBottom: 4, background: activeChat?._id === group._id && chatType === "group" ? "rgba(99,102,241,0.12)" : "transparent", textAlign: "left" }}>
+                  <div style={{ width: 40, height: 40, borderRadius: 10, background: "linear-gradient(135deg, #8b5cf6, #a855f7)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><FiUsers size={18} color="white" /></div>
                   <div>
                     <p style={{ fontWeight: 600, fontSize: 14, color: "var(--text-primary)" }}>{group.name}</p>
                     <p style={{ fontSize: 12, color: "var(--text-muted)" }}>{group.members?.length || 0} members</p>
@@ -389,39 +293,19 @@ export default function EmployeeChatPage() {
       <div style={{ flex: 1, display: "flex", flexDirection: "column", background: "rgba(22,33,62,0.3)", borderRadius: "0 16px 16px 0" }}>
         {activeChat ? (
           <>
-            <div style={{
-              padding: "16px 20px", borderBottom: "1px solid var(--border-color)",
-              display: "flex", justifyContent: "space-between", alignItems: "center",
-            }}>
+            <div style={{ padding: "16px 20px", borderBottom: "1px solid var(--border-color)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                <div style={{
-                  width: 40, height: 40, borderRadius: 10,
-                  background: chatType === "group" ? "linear-gradient(135deg, #8b5cf6, #a855f7)" : "linear-gradient(135deg, #6366f1, #8b5cf6)",
-                  display: "flex", alignItems: "center", justifyContent: "center",
-                  fontSize: 14, fontWeight: 700, color: "white",
-                }}>
+                <div style={{ width: 40, height: 40, borderRadius: 10, background: chatType === "group" ? "linear-gradient(135deg, #8b5cf6, #a855f7)" : "linear-gradient(135deg, #6366f1, #8b5cf6)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14, fontWeight: 700, color: "white" }}>
                   {chatType === "group" ? <FiUsers size={18} color="white" /> : activeChat.name?.slice(0, 2).toUpperCase()}
                 </div>
                 <div>
                   <p style={{ fontWeight: 600, fontSize: 15 }}>{activeChat.name}</p>
-                  <p style={{ fontSize: 12, color: "var(--text-muted)" }}>
-                    {chatType === "dm" ? "Direct Message" : `${activeChat.members?.length || 0} members`}
-                  </p>
+                  <p style={{ fontSize: 12, color: "var(--text-muted)" }}>{chatType === "dm" ? "Direct Message" : `${activeChat.members?.length || 0} members`}</p>
                 </div>
               </div>
               <div style={{ display: "flex", gap: 8 }}>
-                <button onClick={() => startCall("audio")} style={{
-                  background: "rgba(34,197,94,0.1)", border: "1px solid rgba(34,197,94,0.2)",
-                  borderRadius: 10, padding: 10, cursor: "pointer", color: "#22c55e",
-                }}>
-                  <FiPhone size={16} />
-                </button>
-                <button onClick={() => startCall("video")} style={{
-                  background: "rgba(99,102,241,0.1)", border: "1px solid rgba(99,102,241,0.2)",
-                  borderRadius: 10, padding: 10, cursor: "pointer", color: "#818cf8",
-                }}>
-                  <FiVideo size={16} />
-                </button>
+                <button onClick={() => startCall("audio")} style={{ background: "rgba(34,197,94,0.1)", border: "1px solid rgba(34,197,94,0.2)", borderRadius: 10, padding: 10, cursor: "pointer", color: "#22c55e" }}><FiPhone size={16} /></button>
+                <button onClick={() => startCall("video")} style={{ background: "rgba(99,102,241,0.1)", border: "1px solid rgba(99,102,241,0.2)", borderRadius: 10, padding: 10, cursor: "pointer", color: "#818cf8" }}><FiVideo size={16} /></button>
               </div>
             </div>
 
@@ -435,17 +319,16 @@ export default function EmployeeChatPage() {
                 </div>
               ) : (
                 messages.map((msg) => {
-                  const isMe = msg.senderId === user?.id;
+                  // ✅ Fixed isMe check
+                  const isMe = msg.senderId === user?.id ||
+                               msg.senderId === (user as any)?._id ||
+                               msg.senderName === user?.name;
                   return (
                     <div key={msg._id} style={{ display: "flex", flexDirection: "column", alignItems: isMe ? "flex-end" : "flex-start" }}>
                       {!isMe && chatType === "group" && (
-                        <p style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 2, paddingLeft: 4 }}>
-                          {msg.senderName}
-                        </p>
+                        <p style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 2, paddingLeft: 4 }}>{msg.senderName}</p>
                       )}
-                      <div className={`chat-bubble ${isMe ? "chat-bubble-sent" : "chat-bubble-received"}`}>
-                        {msg.message}
-                      </div>
+                      <div className={`chat-bubble ${isMe ? "chat-bubble-sent" : "chat-bubble-received"}`}>{msg.message}</div>
                       <p style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 2, padding: "0 4px" }}>
                         {new Date(msg.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
                       </p>
@@ -457,23 +340,8 @@ export default function EmployeeChatPage() {
             </div>
 
             <div style={{ padding: "16px 20px", borderTop: "1px solid var(--border-color)", display: "flex", gap: 12 }}>
-              <input
-                className="input-field"
-                value={newMessage}
-                onChange={(e) => setNewMessage(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && sendMessage()}
-                placeholder="Type a message..."
-                style={{ flex: 1 }}
-                disabled={sending}
-              />
-              <button
-                onClick={sendMessage}
-                className="gradient-btn"
-                style={{ padding: "10px 20px", opacity: sending ? 0.6 : 1 }}
-                disabled={!newMessage.trim() || sending}
-              >
-                <FiSend size={18} />
-              </button>
+              <input className="input-field" value={newMessage} onChange={(e) => setNewMessage(e.target.value)} onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && sendMessage()} placeholder="Type a message..." style={{ flex: 1 }} disabled={sending} />
+              <button onClick={sendMessage} className="gradient-btn" style={{ padding: "10px 20px", opacity: sending ? 0.6 : 1 }} disabled={!newMessage.trim() || sending}><FiSend size={18} /></button>
             </div>
           </>
         ) : (
@@ -493,9 +361,7 @@ export default function EmployeeChatPage() {
           <div className="modal-content" onClick={(e) => e.stopPropagation()}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
               <h2 style={{ fontSize: 20, fontWeight: 700 }}>New Chat</h2>
-              <button onClick={() => setShowNewChat(false)} style={{ background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer" }}>
-                <FiX size={20} />
-              </button>
+              <button onClick={() => setShowNewChat(false)} style={{ background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer" }}><FiX size={20} /></button>
             </div>
             <div style={{ position: "relative", marginBottom: 16 }}>
               <FiSearch style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", color: "var(--text-muted)" }} />
@@ -503,19 +369,8 @@ export default function EmployeeChatPage() {
             </div>
             <div style={{ maxHeight: 300, overflowY: "auto" }}>
               {filteredUsers.map((u) => (
-                <button key={u._id} onClick={() => startNewChat(u)} style={{
-                  width: "100%", padding: "10px 12px", display: "flex", alignItems: "center", gap: 12,
-                  border: "none", borderRadius: 8, cursor: "pointer", background: "transparent",
-                  textAlign: "left", marginBottom: 4,
-                }}>
-                  <div style={{
-                    width: 36, height: 36, borderRadius: 8,
-                    background: "linear-gradient(135deg, #6366f1, #8b5cf6)",
-                    display: "flex", alignItems: "center", justifyContent: "center",
-                    fontSize: 13, fontWeight: 700, color: "white",
-                  }}>
-                    {u.name?.slice(0, 2).toUpperCase()}
-                  </div>
+                <button key={u._id} onClick={() => startNewChat(u)} style={{ width: "100%", padding: "10px 12px", display: "flex", alignItems: "center", gap: 12, border: "none", borderRadius: 8, cursor: "pointer", background: "transparent", textAlign: "left", marginBottom: 4 }}>
+                  <div style={{ width: 36, height: 36, borderRadius: 8, background: "linear-gradient(135deg, #6366f1, #8b5cf6)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, fontWeight: 700, color: "white" }}>{u.name?.slice(0, 2).toUpperCase()}</div>
                   <div>
                     <p style={{ fontWeight: 600, fontSize: 14, color: "var(--text-primary)" }}>{u.name}</p>
                     <p style={{ fontSize: 12, color: "var(--text-muted)" }}>{u.department}</p>
@@ -533,9 +388,7 @@ export default function EmployeeChatPage() {
           <div className="modal-content" onClick={(e) => e.stopPropagation()}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
               <h2 style={{ fontSize: 20, fontWeight: 700 }}>Create Group</h2>
-              <button onClick={() => setShowNewGroup(false)} style={{ background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer" }}>
-                <FiX size={20} />
-              </button>
+              <button onClick={() => setShowNewGroup(false)} style={{ background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer" }}><FiX size={20} /></button>
             </div>
             <div style={{ marginBottom: 16 }}>
               <label style={{ display: "block", fontSize: 12, fontWeight: 500, color: "var(--text-secondary)", marginBottom: 6 }}>Group Name</label>
@@ -550,17 +403,10 @@ export default function EmployeeChatPage() {
               <div style={{ maxHeight: 200, overflowY: "auto" }}>
                 {allUsers.map((u) => (
                   <label key={u._id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 4px", cursor: "pointer" }}>
-                    <input
-                      type="checkbox"
-                      checked={groupForm.members.includes(u._id)}
-                      onChange={(e) => {
-                        if (e.target.checked) {
-                          setGroupForm({ ...groupForm, members: [...groupForm.members, u._id] });
-                        } else {
-                          setGroupForm({ ...groupForm, members: groupForm.members.filter((m) => m !== u._id) });
-                        }
-                      }}
-                    />
+                    <input type="checkbox" checked={groupForm.members.includes(u._id)} onChange={(e) => {
+                      if (e.target.checked) { setGroupForm({ ...groupForm, members: [...groupForm.members, u._id] }); }
+                      else { setGroupForm({ ...groupForm, members: groupForm.members.filter((m) => m !== u._id) }); }
+                    }} />
                     <span style={{ fontSize: 14, color: "var(--text-primary)" }}>{u.name}</span>
                     <span style={{ fontSize: 12, color: "var(--text-muted)" }}>({u.department})</span>
                   </label>
@@ -568,10 +414,7 @@ export default function EmployeeChatPage() {
               </div>
             </div>
             <div style={{ display: "flex", gap: 12, justifyContent: "flex-end" }}>
-              <button onClick={() => setShowNewGroup(false)} style={{
-                padding: "10px 24px", borderRadius: 10, border: "1px solid var(--border-color)",
-                background: "transparent", color: "var(--text-secondary)", cursor: "pointer",
-              }}>Cancel</button>
+              <button onClick={() => setShowNewGroup(false)} style={{ padding: "10px 24px", borderRadius: 10, border: "1px solid var(--border-color)", background: "transparent", color: "var(--text-secondary)", cursor: "pointer" }}>Cancel</button>
               <button onClick={createGroup} className="gradient-btn">Create Group</button>
             </div>
           </div>
@@ -584,28 +427,14 @@ export default function EmployeeChatPage() {
           <div style={{ textAlign: "center", width: "100%", maxWidth: 1000 }}>
             {callStatus === "incoming" ? (
               <div className="glass-card" style={{ padding: 40, width: 320, margin: "0 auto" }}>
-                <div style={{
-                  width: 80, height: 80, borderRadius: 20, margin: "0 auto 20px",
-                  background: "linear-gradient(135deg, #6366f1, #8b5cf6)",
-                  display: "flex", alignItems: "center", justifyContent: "center",
-                }}>
+                <div style={{ width: 80, height: 80, borderRadius: 20, margin: "0 auto 20px", background: "linear-gradient(135deg, #6366f1, #8b5cf6)", display: "flex", alignItems: "center", justifyContent: "center" }}>
                   <FiUser size={40} color="white" />
                 </div>
                 <h3 style={{ fontSize: 18, fontWeight: 700, marginBottom: 8 }}>{caller?.name}</h3>
                 <p style={{ color: "var(--text-muted)", marginBottom: 32 }}>Incoming {callType} call...</p>
                 <div style={{ display: "flex", gap: 16, justifyContent: "center" }}>
-                  <button onClick={acceptCall} style={{
-                    width: 56, height: 56, borderRadius: "50%", background: "#22c55e", border: "none", cursor: "pointer",
-                    display: "flex", alignItems: "center", justifyContent: "center", color: "white",
-                  }}>
-                    <FiPhone size={24} />
-                  </button>
-                  <button onClick={endCall} style={{
-                    width: 56, height: 56, borderRadius: "50%", background: "#ef4444", border: "none", cursor: "pointer",
-                    display: "flex", alignItems: "center", justifyContent: "center", color: "white",
-                  }}>
-                    <FiPhoneOff size={24} />
-                  </button>
+                  <button onClick={acceptCall} style={{ width: 56, height: 56, borderRadius: "50%", background: "#22c55e", border: "none", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: "white" }}><FiPhone size={24} /></button>
+                  <button onClick={endCall} style={{ width: 56, height: 56, borderRadius: "50%", background: "#ef4444", border: "none", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: "white" }}><FiPhoneOff size={24} /></button>
                 </div>
               </div>
             ) : (
@@ -624,24 +453,9 @@ export default function EmployeeChatPage() {
                   </div>
                 </div>
                 <div style={{ padding: "0 0 40px", display: "flex", justifyContent: "center", gap: 20 }}>
-                  <button style={{
-                    width: 56, height: 56, borderRadius: "50%", background: "rgba(255,255,255,0.1)", border: "1px solid rgba(255,255,255,0.2)", cursor: "pointer",
-                    display: "flex", alignItems: "center", justifyContent: "center", color: "white",
-                  }}>
-                    <FiMic size={24} />
-                  </button>
-                  <button style={{
-                    width: 56, height: 56, borderRadius: "50%", background: "rgba(255,255,255,0.1)", border: "1px solid rgba(255,255,255,0.2)", cursor: "pointer",
-                    display: "flex", alignItems: "center", justifyContent: "center", color: "white",
-                  }}>
-                    <FiVideo size={24} />
-                  </button>
-                  <button onClick={endCall} style={{
-                    width: 56, height: 56, borderRadius: "50%", background: "#ef4444", border: "none", cursor: "pointer",
-                    display: "flex", alignItems: "center", justifyContent: "center", color: "white",
-                  }}>
-                    <FiPhoneOff size={24} />
-                  </button>
+                  <button style={{ width: 56, height: 56, borderRadius: "50%", background: "rgba(255,255,255,0.1)", border: "1px solid rgba(255,255,255,0.2)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: "white" }}><FiMic size={24} /></button>
+                  <button style={{ width: 56, height: 56, borderRadius: "50%", background: "rgba(255,255,255,0.1)", border: "1px solid rgba(255,255,255,0.2)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: "white" }}><FiVideo size={24} /></button>
+                  <button onClick={endCall} style={{ width: 56, height: 56, borderRadius: "50%", background: "#ef4444", border: "none", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: "white" }}><FiPhoneOff size={24} /></button>
                 </div>
               </div>
             )}
