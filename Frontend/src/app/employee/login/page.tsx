@@ -13,11 +13,13 @@ export default function EmployeeLoginPage() {
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [errorMessage, setErrorMessage] = useState("");
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
+    setErrorMessage("");
     if (!email || !password) {
-      toast.error("Please fill in all fields");
+      setErrorMessage("Please fill in all fields");
       return;
     }
     setLoading(true);
@@ -26,7 +28,7 @@ export default function EmployeeLoginPage() {
       const { access_token, user } = res.data;
       
       if (user.role !== "employee") {
-        toast.error("Access denied. Employee privileges required.");
+        setErrorMessage("Access denied. Employee privileges required.");
         setLoading(false);
         return;
       }
@@ -36,7 +38,7 @@ export default function EmployeeLoginPage() {
       router.push("/employee/dashboard");
       
     } catch (err: any) {
-      toast.error(err.response?.data?.detail || "Login failed");
+      setErrorMessage(err.response?.data?.detail || "Login failed");
     } finally {
       setLoading(false);
     }
@@ -101,6 +103,24 @@ export default function EmployeeLoginPage() {
         </div>
 
         <form onSubmit={handleLogin}>
+          {errorMessage && (
+            <div
+              role="alert"
+              style={{
+                marginBottom: 18,
+                padding: "10px 12px",
+                borderRadius: 10,
+                border: "1px solid rgba(248, 113, 113, 0.35)",
+                background: "rgba(127, 29, 29, 0.24)",
+                color: "#fecaca",
+                fontSize: 13,
+                fontWeight: 500,
+              }}
+            >
+              {errorMessage}
+            </div>
+          )}
+
           {/* Email */}
           <div style={{ marginBottom: 20 }}>
             <label style={{ display: "block", fontSize: 13, fontWeight: 500, color: "var(--text-secondary)", marginBottom: 8 }}>
@@ -114,7 +134,10 @@ export default function EmployeeLoginPage() {
               <input
                 type="email"
                 value={email}
-                onChange={(e) => setEmail(e.target.value)}
+                onChange={(e) => {
+                  setEmail(e.target.value);
+                  if (errorMessage) setErrorMessage("");
+                }}
                 placeholder="employee@raiseup.com"
                 className="input-field"
                 style={{ paddingLeft: 42 }}
@@ -135,7 +158,10 @@ export default function EmployeeLoginPage() {
               <input
                 type={showPassword ? "text" : "password"}
                 value={password}
-                onChange={(e) => setPassword(e.target.value)}
+                onChange={(e) => {
+                  setPassword(e.target.value);
+                  if (errorMessage) setErrorMessage("");
+                }}
                 placeholder="••••••••"
                 className="input-field"
                 style={{ paddingLeft: 42, paddingRight: 42 }}

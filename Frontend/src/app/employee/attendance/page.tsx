@@ -4,6 +4,13 @@ import { attendanceAPI } from "@/lib/api";
 import toast from "react-hot-toast";
 import { FiClock, FiLogIn, FiLogOut } from "react-icons/fi";
 
+type AttendanceRow = {
+  status?: string;
+  workingHours?: number;
+  clockIn?: string | null;
+  clockOut?: string | null;
+};
+
 export default function EmployeeAttendancePage() {
   const [todayRecord, setTodayRecord] = useState<any>(null);
   const [records, setRecords] = useState<any[]>([]);
@@ -14,6 +21,74 @@ export default function EmployeeAttendancePage() {
   const [selectedDate, setSelectedDate] = useState("");
 
   const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+
+  const getAttendanceBadge = (rec: AttendanceRow) => {
+    const status = String(rec.status || "").toLowerCase();
+
+    if (status === "holiday") {
+      return {
+        text: "Holiday",
+        style: {
+          background: "rgba(6,182,212,0.12)",
+          border: "1px solid rgba(6,182,212,0.3)",
+          color: "#67e8f9",
+        },
+      };
+    }
+
+    if (status === "leave") {
+      return {
+        text: "Leave",
+        style: {
+          background: "rgba(245,158,11,0.12)",
+          border: "1px solid rgba(245,158,11,0.3)",
+          color: "#fbbf24",
+        },
+      };
+    }
+
+    if ((rec.workingHours || 0) >= 9) {
+      return {
+        text: "Full",
+        style: {
+          background: "rgba(34,197,94,0.12)",
+          border: "1px solid rgba(34,197,94,0.3)",
+          color: "#4ade80",
+        },
+      };
+    }
+
+    if (rec.clockIn && !rec.clockOut) {
+      return {
+        text: "Active",
+        style: {
+          background: "rgba(245,158,11,0.12)",
+          border: "1px solid rgba(245,158,11,0.3)",
+          color: "#f59e0b",
+        },
+      };
+    }
+
+    if (rec.clockOut) {
+      return {
+        text: "Short",
+        style: {
+          background: "rgba(239,68,68,0.12)",
+          border: "1px solid rgba(239,68,68,0.3)",
+          color: "#f87171",
+        },
+      };
+    }
+
+    return {
+      text: "No Record",
+      style: {
+        background: "rgba(148,163,184,0.12)",
+        border: "1px solid rgba(148,163,184,0.3)",
+        color: "#94a3b8",
+      },
+    };
+  };
 
   useEffect(() => {
     fetchData();
@@ -224,9 +299,14 @@ export default function EmployeeAttendancePage() {
                     {rec.workingHours ? `${rec.workingHours}h` : "—"}
                   </td>
                   <td>
-                    <span className={`badge ${rec.workingHours >= 9 ? "badge-success" : rec.clockOut ? "badge-danger" : "badge-warning"}`}>
-                      {rec.workingHours >= 9 ? "🟢 Full" : rec.clockOut ? "🔴 Short" : "⏳ Active"}
-                    </span>
+                    {(() => {
+                      const badge = getAttendanceBadge(rec);
+                      return (
+                        <span className="badge" style={badge.style}>
+                          {badge.text}
+                        </span>
+                      );
+                    })()}
                   </td>
                 </tr>
               ))}
@@ -240,3 +320,4 @@ export default function EmployeeAttendancePage() {
     </div>
   );
 }
+

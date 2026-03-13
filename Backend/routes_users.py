@@ -3,9 +3,14 @@ from bson import ObjectId
 from database import users_collection
 from models import UserCreate, UserUpdate, UserResponse, UserLogin, Token
 from auth import verify_password, get_password_hash, create_access_token, get_current_user, get_admin_user
+from pydantic import BaseModel
 import base64
 
 router = APIRouter(prefix="/api", tags=["Users"])
+
+class PasswordChangeRequest(BaseModel):
+    currentPassword: str
+    newPassword: str
 
 
 # ─── Authentication ───────────────────────────────────────
@@ -130,6 +135,32 @@ async def activate_user(user_id: str, admin: dict = Depends(get_admin_user)):
     if result.modified_count == 0:
         raise HTTPException(status_code=404, detail="User not found")
     return {"message": "User activated successfully"}
+
+
+@router.put("/users/{user_id}/change-password")
+async def change_password(user_id: str, payload: PasswordChangeRequest, current_user: dict = Depends(get_current_user)):
+    if current_user["role"] != "admin" and str(current_user["_id"]) != user_id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    user_doc = await users_collection.find_one({"_id": ObjectId(user_id)})
+    if not user_doc:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if current_user["role"] != "admin":
+        if not verify_password(payload.currentPassword, user_doc.get("password", "")):
+            raise HTTPException(status_code=400, detail="Current password is incorrect")
+
+    if len(payload.newPassword) < 6:
+        raise HTTPException(status_code=400, detail="New password must be at least 6 characters")
+
+    if verify_password(payload.newPassword, user_doc.get("password", "")):
+        raise HTTPException(status_code=400, detail="New password must be different from current password")
+
+    await users_collection.update_one(
+        {"_id": ObjectId(user_id)},
+        {"$set": {"password": get_password_hash(payload.newPassword)}}
+    )
+    return {"message": "Password updated successfully"}
 
 
 @router.post("/users/{user_id}/photo")

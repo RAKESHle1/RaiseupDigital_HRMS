@@ -3,7 +3,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { useAuthStore } from "@/lib/store";
 import {
   FiHome, FiUsers, FiClock, FiCalendar, FiMessageSquare,
-  FiLogOut, FiUser, FiMenu, FiX, FiShield, FiBell
+  FiLogOut, FiUser, FiMenu, FiX, FiShield
 } from "react-icons/fi";
 import { useState, useEffect } from "react";
 
@@ -21,7 +21,6 @@ const employeeLinks = [
   { href: "/employee/attendance", label: "Attendance", icon: FiClock },
   { href: "/employee/leaves", label: "Leaves", icon: FiCalendar },
   { href: "/employee/chat", label: "Chat", icon: FiMessageSquare },
-  { href: "/employee/notifications", label: "Notifications", icon: FiBell },
 ];
 
 export default function Sidebar() {

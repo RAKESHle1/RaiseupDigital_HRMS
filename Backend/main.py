@@ -76,14 +76,15 @@ async def disconnect(sid):
 async def join_room(sid, data):
     room = data.get("room")
     if room:
-        sio.enter_room(sid, room)
+        room = str(room)
+        await sio.enter_room(sid, room)
         await sio.emit("room_joined", {"room": room}, room=sid)
 
 @sio.on("leave_room")
 async def leave_room(sid, data):
     room = data.get("room")
     if room:
-        sio.leave_room(sid, room)
+        await sio.leave_room(sid, str(room))
 
 @sio.on("send_message")
 async def handle_message(sid, data):
@@ -102,19 +103,33 @@ async def handle_typing(sid, data):
 # ─── WebRTC Signaling ────────────────────────────────────
 @sio.on("call_user")
 async def call_user(sid, data):
-    await sio.emit("incoming_call", data, room=data.get("to"))
+    to_room = data.get("to")
+    if to_room:
+        await sio.emit("incoming_call", data, room=str(to_room))
 
 @sio.on("call_accepted")
 async def call_accepted(sid, data):
-    await sio.emit("call_accepted", data, room=data.get("to"))
+    to_room = data.get("to")
+    if to_room:
+        await sio.emit("call_accepted", data, room=str(to_room))
 
 @sio.on("ice_candidate")
 async def ice_candidate(sid, data):
-    await sio.emit("ice_candidate", data, room=data.get("to"))
+    to_room = data.get("to")
+    if to_room:
+        await sio.emit("ice_candidate", data, room=str(to_room))
 
 @sio.on("call_ended")
 async def call_ended(sid, data):
-    await sio.emit("call_ended", data, room=data.get("to"))
+    to_room = data.get("to")
+    if to_room:
+        await sio.emit("call_ended", data, room=str(to_room))
+
+@sio.on("call_status_update")
+async def call_status_update(sid, data):
+    to_room = data.get("to")
+    if to_room:
+        await sio.emit("call_status_update", data, room=str(to_room))
 
 
 # ─── Mount Socket.IO ─────────────────────────────────────

@@ -1,19 +1,30 @@
 "use client";
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { useAuthStore } from "@/lib/store";
 import { authAPI, usersAPI } from "@/lib/api";
 import toast from "react-hot-toast";
-import { FiUser, FiMail, FiPhone, FiBriefcase, FiCalendar, FiEdit2, FiCamera } from "react-icons/fi";
+import { FiUser, FiMail, FiPhone, FiBriefcase, FiCalendar, FiCamera, FiArrowLeft, FiLock } from "react-icons/fi";
+import Modal from "react-modal";
 
 export default function ProfilePage() {
-  const { user, updateUser } = useAuthStore();
+  const router = useRouter();
+  const { updateUser } = useAuthStore();
   const [profile, setProfile] = useState<any>(null);
   const [editing, setEditing] = useState(false);
   const [formData, setFormData] = useState<any>({});
   const [loading, setLoading] = useState(true);
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [reEnterNewPassword, setReEnterNewPassword] = useState("");
 
   useEffect(() => {
     fetchProfile();
+  }, []);
+
+  useEffect(() => {
+    Modal.setAppElement("body");
   }, []);
 
   const fetchProfile = async () => {
@@ -37,7 +48,13 @@ export default function ProfilePage() {
         designation: formData.designation,
       });
       toast.success("Profile updated!");
-      updateUser({ name: formData.name });
+      setProfile((prev: any) => ({ ...prev, ...formData }));
+      updateUser({
+        name: formData.name,
+        phone: formData.phone,
+        department: formData.department,
+        designation: formData.designation,
+      });
       setEditing(false);
       fetchProfile();
     } catch (err) {
@@ -52,9 +69,43 @@ export default function ProfilePage() {
       const res = await usersAPI.uploadPhoto(profile._id, file);
       toast.success("Photo updated!");
       updateUser({ profilePhoto: res.data.profilePhoto });
+      setProfile((prev: any) => ({ ...prev, profilePhoto: res.data.profilePhoto }));
       fetchProfile();
     } catch (err) {
       toast.error("Failed to upload photo");
+    }
+  };
+
+  const openPasswordModal = () => {
+    setIsModalOpen(true);
+  };
+
+  const closeModal = () => {
+    setIsModalOpen(false);
+    setCurrentPassword("");
+    setNewPassword("");
+    setReEnterNewPassword("");
+  };
+
+  const handleChangePassword = async () => {
+    if (!currentPassword || !newPassword || !reEnterNewPassword) {
+      toast.error("Please fill all password fields");
+      return;
+    }
+    if (newPassword !== reEnterNewPassword) {
+      toast.error("New passwords do not match");
+      return;
+    }
+    if (newPassword.length < 6) {
+      toast.error("New password must be at least 6 characters");
+      return;
+    }
+    try {
+      await usersAPI.changePassword(profile._id, { currentPassword, newPassword });
+      toast.success("Password changed successfully");
+      closeModal();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.detail || "Failed to change password");
     }
   };
 
@@ -71,13 +122,34 @@ export default function ProfilePage() {
 
   return (
     <div>
-      <div style={{ marginBottom: 28 }}>
-        <h1 style={{ fontSize: 28, fontWeight: 800 }}>
-          <span className="gradient-text">My Profile</span>
-        </h1>
-        <p style={{ color: "var(--text-secondary)", fontSize: 14, marginTop: 4 }}>
-          View and manage your personal information
-        </p>
+      <div style={{ marginBottom: 28, display: "flex", alignItems: "center", gap: 12 }}>
+        <button
+          onClick={() => router.back()}
+          style={{
+            width: 40,
+            height: 40,
+            borderRadius: 10,
+            border: "1px solid var(--border-color)",
+            background: "rgba(99,102,241,0.08)",
+            color: "var(--text-secondary)",
+            cursor: "pointer",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            flexShrink: 0,
+          }}
+          title="Go back"
+        >
+          <FiArrowLeft size={18} />
+        </button>
+        <div>
+          <h1 style={{ fontSize: 28, fontWeight: 800 }}>
+            <span className="gradient-text">My Profile</span>
+          </h1>
+          <p style={{ color: "var(--text-secondary)", fontSize: 14, marginTop: 4 }}>
+            View and manage your personal information
+          </p>
+        </div>
       </div>
 
       <div className="glass-card" style={{ padding: 32 }}>
@@ -115,7 +187,7 @@ export default function ProfilePage() {
             <p style={{ color: "var(--text-secondary)", fontSize: 14 }}>{profile?.designation || "Employee"}</p>
             <p style={{ color: "var(--text-muted)", fontSize: 13 }}>{profile?.department}</p>
           </div>
-          <div style={{ marginLeft: "auto" }}>
+          <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
             <button
               className={editing ? "" : "gradient-btn"}
               onClick={() => editing ? handleSave() : setEditing(true)}
@@ -126,6 +198,24 @@ export default function ProfilePage() {
               } : {}}
             >
               {editing ? "Save Changes" : "Edit Profile"}
+            </button>
+            <button
+              onClick={openPasswordModal}
+              style={{
+                padding: "10px 16px",
+                borderRadius: 10,
+                background: "rgba(99,102,241,0.08)",
+                border: "1px solid rgba(99,102,241,0.24)",
+                color: "var(--text-primary)",
+                cursor: "pointer",
+                fontWeight: 600,
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+              }}
+            >
+              <FiLock size={15} />
+              Change Password
             </button>
             {editing && (
               <button onClick={() => { setEditing(false); setFormData(profile); }} style={{
@@ -173,6 +263,105 @@ export default function ProfilePage() {
             );
           })}
         </div>
+
+        <Modal
+          isOpen={isModalOpen}
+          onRequestClose={closeModal}
+          contentLabel="Change Password"
+          style={{
+            overlay: {
+              backgroundColor: "rgba(8, 11, 24, 0.82)",
+              backdropFilter: "blur(4px)",
+              zIndex: 1100,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+            },
+            content: {
+              position: "relative",
+              inset: "unset",
+              width: "min(92vw, 460px)",
+              border: "1px solid rgba(99,102,241,0.25)",
+              borderRadius: 16,
+              background: "linear-gradient(180deg, rgba(19,24,45,0.98), rgba(14,18,36,0.98))",
+              boxShadow: "0 20px 60px rgba(0,0,0,0.45)",
+              padding: 24,
+              overflow: "hidden",
+            },
+          }}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+            <div>
+              <h2 style={{ fontSize: 22, fontWeight: 700 }}>Change Password</h2>
+              <p style={{ color: "var(--text-muted)", fontSize: 13, marginTop: 4 }}>Use a strong password to secure your account.</p>
+            </div>
+            <button
+              type="button"
+              onClick={closeModal}
+              style={{
+                width: 32,
+                height: 32,
+                borderRadius: 8,
+                border: "1px solid var(--border-color)",
+                background: "transparent",
+                color: "var(--text-muted)",
+                cursor: "pointer",
+                fontSize: 18,
+                lineHeight: 1,
+              }}
+              aria-label="Close password modal"
+            >
+              X
+            </button>
+          </div>
+          <form onSubmit={(e) => { e.preventDefault(); handleChangePassword(); }}>
+            <div style={{ marginBottom: 12 }}>
+              <label htmlFor="currentPassword" style={{ display: "block", fontSize: 12, color: "var(--text-secondary)", marginBottom: 6 }}>Current Password</label>
+              <input
+                className="input-field"
+                type="password"
+                id="currentPassword"
+                value={currentPassword}
+                onChange={(e) => setCurrentPassword(e.target.value)}
+                required
+              />
+            </div>
+            <div style={{ marginBottom: 12 }}>
+              <label htmlFor="newPassword" style={{ display: "block", fontSize: 12, color: "var(--text-secondary)", marginBottom: 6 }}>New Password</label>
+              <input
+                className="input-field"
+                type="password"
+                id="newPassword"
+                value={newPassword}
+                onChange={(e) => setNewPassword(e.target.value)}
+                required
+              />
+            </div>
+            <div style={{ marginBottom: 18 }}>
+              <label htmlFor="reEnterNewPassword" style={{ display: "block", fontSize: 12, color: "var(--text-secondary)", marginBottom: 6 }}>Re-enter New Password</label>
+              <input
+                className="input-field"
+                type="password"
+                id="reEnterNewPassword"
+                value={reEnterNewPassword}
+                onChange={(e) => setReEnterNewPassword(e.target.value)}
+                required
+              />
+            </div>
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}>
+              <button type="button" onClick={closeModal} style={{
+                padding: "10px 18px",
+                borderRadius: 10,
+                border: "1px solid var(--border-color)",
+                background: "transparent",
+                color: "var(--text-secondary)",
+                cursor: "pointer",
+                fontWeight: 600,
+              }}>Cancel</button>
+              <button type="submit" className="gradient-btn" style={{ padding: "10px 18px" }}>Update Password</button>
+            </div>
+          </form>
+        </Modal>
       </div>
     </div>
   );

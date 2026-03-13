@@ -3,8 +3,17 @@ import { useEffect, useState, useRef, useCallback } from "react";
 import { chatAPI, usersAPI } from "@/lib/api";
 import { useAuthStore } from "@/lib/store";
 import toast from "react-hot-toast";
-import { FiSend, FiPlus, FiUsers, FiMessageCircle, FiSearch, FiX, FiPhone, FiVideo, FiMic, FiPhoneOff, FiUser } from "react-icons/fi";
+import { FiSend, FiPlus, FiUsers, FiMessageCircle, FiSearch, FiX, FiPhone, FiVideo, FiMic, FiMicOff, FiUser, FiVideoOff } from "react-icons/fi";
 import socketService from "@/lib/socket";
+
+const getMyId = () => {
+  try {
+    const stored = JSON.parse(localStorage.getItem("user") || "{}");
+    return stored?.id || stored?._id || "";
+  } catch {
+    return "";
+  }
+};
 
 export default function EmployeeChatPage() {
   const { user } = useAuthStore();
@@ -38,6 +47,11 @@ export default function EmployeeChatPage() {
   const pendingOffer = useRef<any>(null);
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
+  const [isMicMuted, setIsMicMuted] = useState(false);
+  const [isCameraOff, setIsCameraOff] = useState(false);
+  const [remoteMicMuted, setRemoteMicMuted] = useState(false);
+  const [callStartedAt, setCallStartedAt] = useState<number | null>(null);
+  const [callSeconds, setCallSeconds] = useState(0);
 
   // ─── Keep refs in sync with state ─────────────────────
   useEffect(() => {
@@ -79,7 +93,8 @@ export default function EmployeeChatPage() {
       ]);
       setConversations(convRes.data);
       setGroups(groupsRes.data);
-      setAllUsers(usersRes.data.filter((u: any) => u._id !== user?.id));
+      const myId = user?.id || (user as any)?._id || getMyId();
+      setAllUsers(usersRes.data.filter((u: any) => u._id !== myId));
     } catch (err) {
       console.error("fetchData error:", err);
     }
@@ -88,9 +103,12 @@ export default function EmployeeChatPage() {
   useEffect(() => {
     fetchData();
     socket.current = socketService.connect();
-    if (user?.id) {
-      socket.current.emit("join_room", { room: user.id });
-    }
+    const myId = user?.id || (user as any)?._id || getMyId();
+    const joinSelfRoom = () => {
+      if (myId) socket.current?.emit("join_room", { room: myId });
+    };
+    if (socket.current?.connected) joinSelfRoom();
+    socket.current?.on("connect", joinSelfRoom);
 
     socket.current.on("new_message", () => {
       fetchMessages(); // now uses ref — no stale closure
@@ -100,11 +118,13 @@ export default function EmployeeChatPage() {
       setCaller(data.from);
       setCallType(data.type);
       pendingOffer.current = data.offer;
+      setRemoteMicMuted(false);
       setCallStatus("incoming");
     });
 
     socket.current.on("call_accepted", async (data: any) => {
       await pc.current?.setRemoteDescription(new RTCSessionDescription(data.answer));
+      setCallStartedAt(Date.now());
       setCallStatus("active");
     });
 
@@ -114,15 +134,23 @@ export default function EmployeeChatPage() {
       }
     });
 
-    socket.current.on("call_ended", () => endCall());
+    socket.current.on("call_status_update", (data: any) => {
+      if (typeof data?.isMicMuted === "boolean") {
+        setRemoteMicMuted(data.isMicMuted);
+      }
+    });
+
+    socket.current.on("call_ended", () => endCall(false));
 
     const interval = setInterval(fetchData, 5000);
     return () => {
       clearInterval(interval);
+      socket.current?.off("connect", joinSelfRoom);
       socket.current?.off("new_message");
       socket.current?.off("incoming_call");
       socket.current?.off("call_accepted");
       socket.current?.off("ice_candidate");
+      socket.current?.off("call_status_update");
       socket.current?.off("call_ended");
     };
   }, [user, fetchData, fetchMessages]);
@@ -143,6 +171,17 @@ export default function EmployeeChatPage() {
     if (remoteVideoRef.current && remoteStream) remoteVideoRef.current.srcObject = remoteStream;
   }, [remoteStream]);
 
+  useEffect(() => {
+    if (callStatus !== "active" || !callStartedAt) {
+      setCallSeconds(0);
+      return;
+    }
+    const timer = setInterval(() => {
+      setCallSeconds(Math.floor((Date.now() - callStartedAt) / 1000));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [callStatus, callStartedAt]);
+
   const sendMessage = async () => {
     if (!newMessage.trim() || !activeChat || sending) return;
     const messageText = newMessage.trim();
@@ -153,6 +192,12 @@ export default function EmployeeChatPage() {
         const receiverId = activeChat.userId || activeChat._id;
         if (!receiverId) { toast.error("No recipient selected"); setNewMessage(messageText); return; }
         await chatAPI.sendMessage({ receiverId, message: messageText });
+        socket.current?.emit("send_message", {
+          receiverId,
+          senderName: user?.name,
+          message: messageText,
+          timestamp: new Date().toISOString(),
+        });
       } else {
         await chatAPI.sendGroupMessage(activeChat._id, { message: messageText });
       }
@@ -194,21 +239,29 @@ export default function EmployeeChatPage() {
     pc.current = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
     pc.current.onicecandidate = (event) => {
       if (event.candidate) {
-        socket.current.emit("ice_candidate", { candidate: event.candidate, to: callStatus === "calling" ? activeChat.userId : caller.id });
+        socket.current.emit("ice_candidate", { candidate: event.candidate, to: callStatus === "calling" ? activeChat.userId : (caller?.id || caller?._id) });
       }
     };
     pc.current.ontrack = (event) => setRemoteStream(event.streams[0]);
   };
 
   const startCall = async (type: "audio" | "video") => {
+    if (!activeChat || chatType !== "dm") {
+      toast.error("Calls are only available in direct chats");
+      return;
+    }
     setCallType(type); setCallStatus("calling"); initPeerConnection();
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: type === "video" });
       setLocalStream(stream);
+      setIsMicMuted(false);
+      setIsCameraOff(type !== "video");
+      setRemoteMicMuted(false);
       stream.getTracks().forEach((track) => pc.current?.addTrack(track, stream));
       const offer = await pc.current?.createOffer();
       await pc.current?.setLocalDescription(offer);
-      socket.current.emit("call_user", { to: activeChat.userId || activeChat._id, type, offer, from: { id: user?.id, name: user?.name, profilePhoto: user?.profilePhoto } });
+      const myId = user?.id || (user as any)?._id || getMyId();
+      socket.current.emit("call_user", { to: activeChat.userId || activeChat._id, type, offer, from: { id: myId, name: user?.name, profilePhoto: user?.profilePhoto } });
     } catch (err) {
       toast.error("Could not access camera/microphone");
       setCallStatus("idle");
@@ -220,21 +273,59 @@ export default function EmployeeChatPage() {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: callType === "video" });
       setLocalStream(stream);
+      setIsMicMuted(false);
+      setIsCameraOff(callType !== "video");
+      setRemoteMicMuted(false);
+      setCallStartedAt(Date.now());
       stream.getTracks().forEach((track) => pc.current?.addTrack(track, stream));
       await pc.current?.setRemoteDescription(new RTCSessionDescription(pendingOffer.current));
       const answer = await pc.current?.createAnswer();
       await pc.current?.setLocalDescription(answer);
-      socket.current.emit("call_accepted", { to: caller.id, answer });
+      socket.current.emit("call_accepted", { to: caller?.id || caller?._id, answer });
     } catch (err) {
       toast.error("Could not access camera/microphone");
       endCall();
     }
   };
 
-  const endCall = () => {
+  const endCall = (notifyPeer = true) => {
     localStream?.getTracks().forEach((track) => track.stop());
-    setLocalStream(null); setRemoteStream(null); pc.current?.close(); setCallStatus("idle");
-    socket.current.emit("call_ended", { to: activeChat?.userId || caller?.id });
+    setLocalStream(null);
+    setRemoteStream(null);
+    setIsMicMuted(false);
+    setIsCameraOff(false);
+    setRemoteMicMuted(false);
+    setCallStartedAt(null);
+    setCallSeconds(0);
+    pc.current?.close();
+    pc.current = null;
+    if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
+    if (localVideoRef.current) localVideoRef.current.srcObject = null;
+    setCallStatus("idle");
+    if (notifyPeer) {
+      socket.current.emit("call_ended", { to: activeChat?.userId || caller?.id || caller?._id });
+    }
+  };
+
+  const toggleMic = () => {
+    if (!localStream) return;
+    const audioTracks = localStream.getAudioTracks();
+    if (audioTracks.length === 0) return;
+    const nextMuted = !isMicMuted;
+    audioTracks.forEach((track) => {
+      track.enabled = !nextMuted;
+    });
+    setIsMicMuted(nextMuted);
+    socket.current?.emit("call_status_update", {
+      to: activeChat?.userId || caller?.id || caller?._id,
+      isMicMuted: nextMuted,
+    });
+  };
+
+  const formatDuration = (totalSeconds: number) => {
+    const minutes = Math.floor(totalSeconds / 60).toString().padStart(2, "0");
+    const seconds = (totalSeconds % 60).toString().padStart(2, "0");
+    return `${minutes}:${seconds}`;
   };
 
   return (
@@ -302,8 +393,22 @@ export default function EmployeeChatPage() {
                 </div>
               </div>
               <div style={{ display: "flex", gap: 8 }}>
-                <button onClick={() => startCall("audio")} style={{ background: "rgba(34,197,94,0.1)", border: "1px solid rgba(34,197,94,0.2)", borderRadius: 10, padding: 10, cursor: "pointer", color: "#22c55e" }}><FiPhone size={16} /></button>
-                <button onClick={() => startCall("video")} style={{ background: "rgba(99,102,241,0.1)", border: "1px solid rgba(99,102,241,0.2)", borderRadius: 10, padding: 10, cursor: "pointer", color: "#818cf8" }}><FiVideo size={16} /></button>
+                <button
+                  onClick={() => startCall("audio")}
+                  disabled={chatType !== "dm"}
+                  title={chatType !== "dm" ? "Calling is available only in direct chat" : "Start audio call"}
+                  style={{ background: "rgba(34,197,94,0.1)", border: "1px solid rgba(34,197,94,0.2)", borderRadius: 10, padding: 10, cursor: chatType === "dm" ? "pointer" : "not-allowed", color: "#22c55e", opacity: chatType === "dm" ? 1 : 0.5 }}
+                >
+                  <FiPhone size={16} />
+                </button>
+                <button
+                  onClick={() => startCall("video")}
+                  disabled={chatType !== "dm"}
+                  title={chatType !== "dm" ? "Calling is available only in direct chat" : "Start video call"}
+                  style={{ background: "rgba(99,102,241,0.1)", border: "1px solid rgba(99,102,241,0.2)", borderRadius: 10, padding: 10, cursor: chatType === "dm" ? "pointer" : "not-allowed", color: "#818cf8", opacity: chatType === "dm" ? 1 : 0.5 }}
+                >
+                  <FiVideo size={16} />
+                </button>
               </div>
             </div>
 
@@ -345,8 +450,10 @@ export default function EmployeeChatPage() {
         ) : (
           <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>
             <div style={{ textAlign: "center" }}>
-              <FiMessageCircle size={64} color="var(--text-muted)" />
-              <h3 style={{ color: "var(--text-secondary)", marginTop: 16, fontSize: 18 }}>Select a conversation</h3>
+              <div style={{ width: 96, height: 96, margin: "0 auto", borderRadius: 28, background: "linear-gradient(135deg, rgba(99,102,241,0.24), rgba(139,92,246,0.18))", border: "1px solid rgba(129,140,248,0.35)", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 12px 36px rgba(99,102,241,0.2)" }}>
+                <FiMessageCircle size={48} color="#c4b5fd" />
+              </div>
+              <h3 style={{ color: "var(--text-secondary)", marginTop: 20, fontSize: 18 }}>Select a conversation</h3>
               <p style={{ color: "var(--text-muted)", fontSize: 14 }}>Choose a chat from the left panel or start a new one</p>
             </div>
           </div>
@@ -421,8 +528,8 @@ export default function EmployeeChatPage() {
 
       {/* Call UI */}
       {callStatus !== "idle" && (
-        <div className="modal-overlay" style={{ zIndex: 1000, background: "rgba(15,15,26,0.95)" }}>
-          <div style={{ textAlign: "center", width: "100%", maxWidth: 1000 }}>
+        <div className="modal-overlay" style={{ zIndex: 1000, background: "rgba(7,12,24,0.92)", backdropFilter: "blur(4px)" }}>
+          <div style={{ width: "min(1100px, 92vw)" }}>
             {callStatus === "incoming" ? (
               <div className="glass-card" style={{ padding: 40, width: 320, margin: "0 auto" }}>
                 <div style={{ width: 80, height: 80, borderRadius: 20, margin: "0 auto 20px", background: "linear-gradient(135deg, #6366f1, #8b5cf6)", display: "flex", alignItems: "center", justifyContent: "center" }}>
@@ -432,28 +539,61 @@ export default function EmployeeChatPage() {
                 <p style={{ color: "var(--text-muted)", marginBottom: 32 }}>Incoming {callType} call...</p>
                 <div style={{ display: "flex", gap: 16, justifyContent: "center" }}>
                   <button onClick={acceptCall} style={{ width: 56, height: 56, borderRadius: "50%", background: "#22c55e", border: "none", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: "white" }}><FiPhone size={24} /></button>
-                  <button onClick={endCall} style={{ width: 56, height: 56, borderRadius: "50%", background: "#ef4444", border: "none", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: "white" }}><FiPhoneOff size={24} /></button>
+                  <button onClick={() => endCall()} style={{ width: 56, height: 56, borderRadius: "50%", background: "#ef4444", border: "none", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: "white" }}><FiPhone size={24} /></button>
                 </div>
               </div>
             ) : (
-              <div style={{ display: "flex", flexDirection: "column", height: "80vh", gap: 20 }}>
-                <div style={{ flex: 1, display: "flex", gap: 20, padding: 20 }}>
-                  <div style={{ flex: 1, position: "relative", background: "#000", borderRadius: 20, overflow: "hidden" }}>
-                    <video ref={remoteVideoRef} autoPlay playsInline style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-                    {!remoteStream && (
-                      <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 12 }}>
-                        <p style={{ color: "white", fontSize: 14 }}>Connecting to {activeChat?.name || caller?.name}...</p>
+              <div style={{ display: "flex", flexDirection: "column", height: "min(760px, 86vh)", gap: 16 }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "8px 6px" }}>
+                  <div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <p style={{ color: "white", fontSize: 16, fontWeight: 700 }}>{activeChat?.name || caller?.name}</p>
+                      {remoteMicMuted && (
+                        <span title={`${activeChat?.name || caller?.name} muted`} style={{ width: 22, height: 22, borderRadius: "50%", background: "rgba(239,68,68,0.92)", display: "inline-flex", alignItems: "center", justifyContent: "center", color: "white" }}>
+                          <FiMicOff size={12} />
+                        </span>
+                      )}
+                    </div>
+                    <p style={{ color: "rgba(255,255,255,0.72)", fontSize: 13 }}>
+                      {callStatus === "calling" ? `Calling (${callType})...` : `Connected - ${formatDuration(callSeconds)}`}
+                    </p>
+                  </div>
+                  <span style={{ fontSize: 12, color: "rgba(255,255,255,0.75)", border: "1px solid rgba(255,255,255,0.2)", borderRadius: 999, padding: "6px 12px" }}>
+                    {callType === "video" ? "Video Call" : "Audio Call"}
+                  </span>
+                </div>
+                <div style={{ flex: 1, position: "relative", background: "#000", borderRadius: 20, overflow: "hidden", border: "1px solid rgba(255,255,255,0.12)" }}>
+                  <video ref={remoteVideoRef} autoPlay playsInline style={{ width: "100%", height: "100%", objectFit: "cover", display: remoteStream && callType === "video" ? "block" : "none" }} />
+                  {(!remoteStream || callType === "audio") && (
+                    <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 12, background: "radial-gradient(circle at center, rgba(99,102,241,0.28), rgba(0,0,0,0.95))" }}>
+                      <div style={{ width: 88, height: 88, borderRadius: "50%", background: "rgba(255,255,255,0.12)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                        <FiUser size={44} color="white" />
+                      </div>
+                      <p style={{ color: "white", fontSize: 14 }}>{remoteStream ? "Voice connected" : `Connecting to ${activeChat?.name || caller?.name}...`}</p>
+                    </div>
+                  )}
+                  <div style={{ position: "absolute", bottom: 16, right: 16, width: 220, height: 140, background: "#202124", borderRadius: 14, overflow: "hidden", border: "1px solid rgba(255,255,255,0.28)" }}>
+                    {callType === "video" && !isCameraOff ? (
+                      <video ref={localVideoRef} autoPlay muted playsInline style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                    ) : (
+                      <div style={{ width: "100%", height: "100%", display: "flex", flexDirection: "column", gap: 8, alignItems: "center", justifyContent: "center", color: "rgba(255,255,255,0.8)" }}>
+                        <FiVideoOff size={22} />
+                        <span style={{ fontSize: 12 }}>Camera off</span>
                       </div>
                     )}
-                    <div style={{ position: "absolute", bottom: 20, right: 20, width: 200, height: 150, background: "#222", borderRadius: 12, overflow: "hidden", border: "2px solid rgba(255,255,255,0.2)" }}>
-                      <video ref={localVideoRef} autoPlay muted playsInline style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-                    </div>
                   </div>
                 </div>
-                <div style={{ padding: "0 0 40px", display: "flex", justifyContent: "center", gap: 20 }}>
-                  <button style={{ width: 56, height: 56, borderRadius: "50%", background: "rgba(255,255,255,0.1)", border: "1px solid rgba(255,255,255,0.2)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: "white" }}><FiMic size={24} /></button>
-                  <button style={{ width: 56, height: 56, borderRadius: "50%", background: "rgba(255,255,255,0.1)", border: "1px solid rgba(255,255,255,0.2)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: "white" }}><FiVideo size={24} /></button>
-                  <button onClick={endCall} style={{ width: 56, height: 56, borderRadius: "50%", background: "#ef4444", border: "none", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: "white" }}><FiPhoneOff size={24} /></button>
+                <div style={{ paddingBottom: 6, display: "flex", justifyContent: "center", gap: 14 }}>
+                  <button
+                    onClick={toggleMic}
+                    style={{ width: 58, height: 58, borderRadius: "50%", background: isMicMuted ? "rgba(239,68,68,0.95)" : "rgba(255,255,255,0.1)", border: "1px solid rgba(255,255,255,0.22)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: "white" }}
+                    title={isMicMuted ? "Unmute microphone" : "Mute microphone"}
+                  >
+                    {isMicMuted ? <FiMicOff size={24} /> : <FiMic size={24} />}
+                  </button>
+                  <button onClick={() => endCall()} style={{ width: 58, height: 58, borderRadius: "50%", background: "#ef4444", border: "none", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: "white" }} title="End call">
+                    <FiPhone size={24} />
+                  </button>
                 </div>
               </div>
             )}
@@ -463,3 +603,7 @@ export default function EmployeeChatPage() {
     </div>
   );
 }
+
+
+
+

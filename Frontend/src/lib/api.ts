@@ -25,6 +25,14 @@ api.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error.response?.status === 401) {
+      const requestUrl = String(error.config?.url || '');
+      const isLoginRequest = requestUrl.includes('/api/auth/login');
+
+      // Let login pages handle invalid credentials without global redirect.
+      if (isLoginRequest) {
+        return Promise.reject(error);
+      }
+
       if (typeof window !== 'undefined') {
         localStorage.removeItem('token');
         localStorage.removeItem('user');
@@ -51,6 +59,8 @@ export const usersAPI = {
   getById: (id: string) => api.get(`/api/users/${id}`),
   create: (data: any) => api.post('/api/users', data),
   update: (id: string, data: any) => api.put(`/api/users/${id}`, data),
+  changePassword: (id: string, data: { currentPassword: string; newPassword: string }) =>
+    api.put(`/api/users/${id}/change-password`, data),
   deactivate: (id: string) => api.put(`/api/users/${id}/deactivate`),
   activate: (id: string) => api.put(`/api/users/${id}/activate`),
   uploadPhoto: (id: string, file: File) => {
