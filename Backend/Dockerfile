@@ -14,14 +14,15 @@ RUN apt-get update && apt-get install -y \
 # Set work directory
 WORKDIR /app
 
-# Install AI dependencies via Conda (PRE-COMPILED - NO BUILDING!)
+# Install the heavy dlib binary via Conda (PRE-COMPILED - NO BUILDING!)
 RUN conda install -c conda-forge -y \
     python=3.10 \
     dlib \
-    face_recognition \
-    numpy=1.26 \
-    opencv \
     && conda clean -afy
+
+# Install Face Recognition and its Models specifically via Pip inside Conda
+# This ensures all AI weights are downloaded correctly
+RUN pip install --no-cache-dir face-recognition face-recognition-models
 
 # Install remaining backend dependencies via Pip
 COPY requirements.txt .
@@ -31,4 +32,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Start the application using socket_app
+# We explicitly set the port to $PORT which Render provides
 CMD uvicorn main:socket_app --host 0.0.0.0 --port $PORT
