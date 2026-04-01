@@ -1,3 +1,11 @@
+import os
+from dotenv import load_dotenv
+
+# Load environment variables (Local only, Render uses dashboard settings)
+try:
+    load_dotenv()
+except Exception:
+    pass
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
@@ -161,6 +169,9 @@ socket_app = socketio.ASGIApp(sio, app)
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:socket_app", host="0.0.0.0", port=8000, reload=True)
+    # Render provides PORT environment variable
+    port = int(os.environ.get("PORT", 8000))
+    print(f"DEBUG: Starting server on port {port}")
+    uvicorn.run("main:socket_app", host="0.0.0.0", port=port, reload=False)
 
 
