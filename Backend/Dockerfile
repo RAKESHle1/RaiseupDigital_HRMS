@@ -1,20 +1,12 @@
-# Use an official Python runtime as a parent image
-FROM python:3.10-slim-bullseye
+# Use the industry-standard face recognition image that comes with dlib and models PRE-INSTALLED
+FROM ageitgey/face_recognition:latest
 
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE 1
 ENV PYTHONUNBUFFERED 1
-# IMPORTANT: Limit build threads to 1 to stay under Render's memory limits during compilation
-ENV MAKEFLAGS="-j1"
 
-# Install system dependencies needed for dlib and opencv
+# Install basic system deps for web server
 RUN apt-get update && apt-get install -y \
-    build-essential \
-    cmake \
-    libopenblas-dev \
-    liblapack-dev \
-    libx11-dev \
-    libgtk-3-dev \
     libgl1-mesa-glx \
     libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
@@ -22,14 +14,10 @@ RUN apt-get update && apt-get install -y \
 # Set work directory
 WORKDIR /app
 
-# Upgrade pip and install wheel
-RUN pip install --no-cache-dir --upgrade pip wheel
+# Upgrade pip
+RUN pip install --no-cache-dir --upgrade pip
 
-# Install dlib first with low-memory settings
-# This is the most memory-intensive part
-RUN pip install --no-cache-dir dlib
-
-# Install remaining Python dependencies
+# Install remaining Python dependencies (WITHOUT dlib since it's already there)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
@@ -37,4 +25,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Start the application
+# Use socket_app to support Chat + FRS
 CMD uvicorn main:socket_app --host 0.0.0.0 --port $PORT
