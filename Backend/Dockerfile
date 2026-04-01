@@ -4,6 +4,8 @@ FROM python:3.10-slim-bullseye
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE 1
 ENV PYTHONUNBUFFERED 1
+# IMPORTANT: Limit build threads to 1 to stay under Render's memory limits during compilation
+ENV MAKEFLAGS="-j1"
 
 # Install system dependencies needed for dlib and opencv
 RUN apt-get update && apt-get install -y \
@@ -20,16 +22,19 @@ RUN apt-get update && apt-get install -y \
 # Set work directory
 WORKDIR /app
 
-# Install Python dependencies
+# Upgrade pip and install wheel
+RUN pip install --no-cache-dir --upgrade pip wheel
+
+# Install dlib first with low-memory settings
+# This is the most memory-intensive part
+RUN pip install --no-cache-dir dlib
+
+# Install remaining Python dependencies
 COPY requirements.txt .
-# We install dlib carefully to avoid memory peaks
-RUN pip install --no-cache-dir --upgrade pip
-RUN pip install --no-cache-dir wheel
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy project
 COPY . .
 
 # Start the application
-# We use socket_app to handle both REST and Real-time chat
 CMD uvicorn main:socket_app --host 0.0.0.0 --port $PORT
