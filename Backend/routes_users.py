@@ -65,24 +65,36 @@ async def create_user(user: UserCreate, admin: dict = Depends(get_admin_user)):
 
 @router.get("/users")
 async def get_all_users(current_user: dict = Depends(get_current_user)):
-    users = []
-    cursor = users_collection.find({"isActive": True})
-    async for user in cursor:
-        user["_id"] = str(user["_id"])
-        user.pop("password", None)
-        users.append(user)
-    return users
+    try:
+        print(f"Fetching active users (requested by {current_user.get('email')})")
+        users = []
+        cursor = users_collection.find({"isActive": True})
+        async for user in cursor:
+            user["_id"] = str(user["_id"])
+            user.pop("password", None)
+            users.append(user)
+        print(f"Retrieved {len(users)} active users")
+        return users
+    except Exception as e:
+        print(f"Error in get_all_users: {e}")
+        raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
 
 
 @router.get("/users/all")
 async def get_all_users_including_inactive(admin: dict = Depends(get_admin_user)):
-    users = []
-    cursor = users_collection.find()
-    async for user in cursor:
-        user["_id"] = str(user["_id"])
-        user.pop("password", None)
-        users.append(user)
-    return users
+    try:
+        print(f"Fetching all users (requested by admin {admin.get('email')})")
+        users = []
+        cursor = users_collection.find()
+        async for user in cursor:
+            user["_id"] = str(user["_id"])
+            user.pop("password", None)
+            users.append(user)
+        print(f"Retrieved total {len(users)} users")
+        return users
+    except Exception as e:
+        print(f"Error in get_all_users_including_inactive: {e}")
+        raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
 
 
 @router.get("/users/{user_id}")

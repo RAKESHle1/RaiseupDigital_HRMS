@@ -3,8 +3,30 @@ import { useEffect, useState, useRef, useCallback } from "react";
 import { chatAPI, usersAPI } from "@/lib/api";
 import { useAuthStore } from "@/lib/store";
 import toast from "react-hot-toast";
-import { FiSend, FiPlus, FiUsers, FiMessageCircle, FiSearch, FiX, FiPhone, FiVideo, FiMic, FiMicOff, FiUser, FiVideoOff } from "react-icons/fi";
+import { FiSend, FiPlus, FiUsers, FiMessageCircle, FiSearch, FiX, FiPhone, FiVideo, FiMic, FiMicOff, FiUser, FiVideoOff, FiCheck } from "react-icons/fi";
 import socketService from "@/lib/socket";
+import { playNotificationSound, startCallRingtone } from "@/lib/sounds";
+
+// ─── Helper: format chat timestamp like WhatsApp ────────
+const formatChatTime = (timestamp: string) => {
+  try {
+    const msgDate = new Date(timestamp);
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const yesterday = new Date(today.getTime() - 86400000);
+    const msgDay = new Date(msgDate.getFullYear(), msgDate.getMonth(), msgDate.getDate());
+
+    if (msgDay.getTime() === today.getTime()) {
+      return msgDate.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Kolkata" });
+    } else if (msgDay.getTime() === yesterday.getTime()) {
+      return "Yesterday";
+    } else {
+      return msgDate.toLocaleDateString("en-IN", { day: "2-digit", month: "2-digit", year: "2-digit" });
+    }
+  } catch {
+    return "";
+  }
+};
 
 const getMyId = () => {
   try {
@@ -30,6 +52,11 @@ export default function EmployeeChatPage() {
   const [groupForm, setGroupForm] = useState({ name: "", description: "", members: [] as string[] });
   const [tab, setTab] = useState<"chats" | "groups">("chats");
   const [sending, setSending] = useState(false);
+  const [isPeerTyping, setIsPeerTyping] = useState(false);
+  const [typingUserName, setTypingUserName] = useState("");
+  const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({});
+  const [otherReadTimestamp, setOtherReadTimestamp] = useState<string>("");
+  const [presenceByUser, setPresenceByUser] = useState<Record<string, "online" | "leave" | "offline">>({});
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // ─── Refs to avoid stale closures ─────────────────────
@@ -44,9 +71,14 @@ export default function EmployeeChatPage() {
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
   const pc = useRef<RTCPeerConnection | null>(null);
   const socket = useRef<any>(null);
+  const isTypingRef = useRef(false);
+  const lastTypingEmitAtRef = useRef(0);
+  const typingPauseTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const typingIndicatorTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingOffer = useRef<any>(null);
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
+  const stopRingtoneRef = useRef<(() => void) | null>(null);
   const [isMicMuted, setIsMicMuted] = useState(false);
   const [isCameraOff, setIsCameraOff] = useState(false);
   const [remoteMicMuted, setRemoteMicMuted] = useState(false);
@@ -73,16 +105,65 @@ export default function EmployeeChatPage() {
         const id = currentChat.userId || currentChat._id;
         if (!id) return;
         res = await chatAPI.getMessages(id);
+        // New response format: { messages: [...], otherReadTimestamp: "..." }
+        const msgData = res.data.messages || res.data;
+        const readTs = res.data.otherReadTimestamp || "";
+        const sortedMessages = (Array.isArray(msgData) ? msgData : []).sort(
+          (a: any, b: any) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+        );
+        setMessages(sortedMessages);
+        setOtherReadTimestamp(readTs);
       } else {
         res = await chatAPI.getGroupMessages(currentChat._id);
+        const sortedMessages = (Array.isArray(res.data) ? res.data : []).sort(
+          (a: any, b: any) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+        );
+        setMessages(sortedMessages);
+        setOtherReadTimestamp("");
       }
-      // Sort messages by timestamp before setting them
-      const sortedMessages = res.data.sort((a: any, b: any) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
-      setMessages(sortedMessages);
     } catch (err) {
       console.error("fetchMessages error:", err);
     }
   }, []);
+
+  const getCurrentUserId = useCallback(() => {
+    return user?.id || (user as any)?._id || getMyId();
+  }, [user]);
+
+  const loadUnreadCounts = useCallback(() => ({}), []);
+
+  const clearUnreadForUser = useCallback(async (otherUserId?: string) => {
+    if (!otherUserId) return;
+    try {
+      await chatAPI.markRead(otherUserId);
+      setUnreadCounts((prev) => {
+        if (!prev[otherUserId]) return prev;
+        const next = { ...prev };
+        delete next[otherUserId];
+        return next;
+      });
+    } catch {}
+  }, []);
+
+  const incrementUnreadForUser = useCallback((otherUserId?: string) => {
+    if (!otherUserId) return;
+    setUnreadCounts((prev) => ({
+      ...prev,
+      [otherUserId]: (prev[otherUserId] || 0) + 1,
+    }));
+  }, []);
+
+  const getPresenceStatus = useCallback((userId?: string) => {
+    if (!userId) return "offline" as const;
+    return presenceByUser[String(userId)] || "offline";
+  }, [presenceByUser]);
+
+  const getPresenceMeta = useCallback((userId?: string) => {
+    const status = getPresenceStatus(userId);
+    if (status === "online") return { label: "Online", color: "#22c55e" };
+    if (status === "leave") return { label: "On Leave", color: "#f59e0b" };
+    return { label: "Offline", color: "rgba(148,163,184,0.95)" };
+  }, [getPresenceStatus]);
 
   const fetchData = useCallback(async () => {
     try {
@@ -91,27 +172,172 @@ export default function EmployeeChatPage() {
         chatAPI.getMyGroups(),
         usersAPI.getAll(),
       ]);
-      setConversations(convRes.data);
+      const sortedConversations = [...convRes.data].sort(
+        (a: any, b: any) => new Date(b.lastTimestamp || 0).getTime() - new Date(a.lastTimestamp || 0).getTime()
+      );
+      setConversations(sortedConversations);
       setGroups(groupsRes.data);
       const myId = user?.id || (user as any)?._id || getMyId();
       setAllUsers(usersRes.data.filter((u: any) => u._id !== myId));
+
+      // Extract unread counts from conversation data (server-side)
+      const newUnreadCounts: Record<string, number> = {};
+      sortedConversations.forEach((c: any) => {
+        if (c.unreadCount > 0) {
+          newUnreadCounts[String(c.userId)] = c.unreadCount;
+        }
+      });
+      setUnreadCounts(newUnreadCounts);
+
+      const presenceUserIds = sortedConversations
+        .map((c: any) => String(c.userId || ""))
+        .filter(Boolean);
+      if (presenceUserIds.length > 0) {
+        const presenceRes = await chatAPI.getPresence(presenceUserIds);
+        if (presenceRes?.data && typeof presenceRes.data === "object") {
+          setPresenceByUser((prev) => ({ ...prev, ...presenceRes.data }));
+        }
+      }
+
+      if (!activeChatRef.current && sortedConversations.length > 0) {
+        setActiveChat(sortedConversations[0]);
+        setChatType("dm");
+      }
     } catch (err) {
       console.error("fetchData error:", err);
     }
   }, [user]);
+
+  const stopPeerTypingIndicator = useCallback(() => {
+    if (typingIndicatorTimeoutRef.current) {
+      clearTimeout(typingIndicatorTimeoutRef.current);
+      typingIndicatorTimeoutRef.current = null;
+    }
+    setIsPeerTyping(false);
+    setTypingUserName("");
+  }, []);
+
+  const emitStopTyping = useCallback((chatOverride?: any) => {
+    if (!isTypingRef.current || chatTypeRef.current !== "dm") return;
+    const targetChat = chatOverride || activeChatRef.current;
+    const receiverId = targetChat?.userId || targetChat?._id;
+    if (!receiverId) return;
+    socket.current?.emit("stop_typing", {
+      receiverId,
+      senderId: user?.id || (user as any)?._id || getMyId(),
+      senderName: user?.name,
+    });
+    isTypingRef.current = false;
+    lastTypingEmitAtRef.current = 0;
+  }, [user]);
+
+  const emitTyping = useCallback((chatOverride?: any) => {
+    const targetChat = chatOverride || activeChatRef.current;
+    if (!targetChat || chatTypeRef.current !== "dm") return;
+    const receiverId = targetChat.userId || targetChat._id;
+    if (!receiverId) return;
+    socket.current?.emit("typing", {
+      receiverId,
+      senderId: user?.id || (user as any)?._id || getMyId(),
+      senderName: user?.name,
+    });
+    isTypingRef.current = true;
+    lastTypingEmitAtRef.current = Date.now();
+  }, [user]);
+
+  const handleMessageInputChange = (value: string) => {
+    setNewMessage(value);
+    if (chatTypeRef.current !== "dm" || !activeChatRef.current) return;
+
+    const trimmed = value.trim();
+    if (trimmed.length === 0) {
+      if (typingPauseTimeoutRef.current) {
+        clearTimeout(typingPauseTimeoutRef.current);
+        typingPauseTimeoutRef.current = null;
+      }
+      emitStopTyping();
+      return;
+    }
+
+    const now = Date.now();
+    if (!isTypingRef.current || now - lastTypingEmitAtRef.current > 700) {
+      emitTyping();
+    }
+
+    if (typingPauseTimeoutRef.current) {
+      clearTimeout(typingPauseTimeoutRef.current);
+    }
+    typingPauseTimeoutRef.current = setTimeout(() => {
+      emitStopTyping();
+    }, 1200);
+  };
+
+  useEffect(() => {
+    // No need to load from localStorage anymore — server provides unread counts
+  }, []);
 
   useEffect(() => {
     fetchData();
     socket.current = socketService.connect();
     const myId = user?.id || (user as any)?._id || getMyId();
     const joinSelfRoom = () => {
-      if (myId) socket.current?.emit("join_room", { room: myId });
+      if (myId) socket.current?.emit("join_room", { room: myId, self: true });
     };
     if (socket.current?.connected) joinSelfRoom();
     socket.current?.on("connect", joinSelfRoom);
 
-    socket.current.on("new_message", () => {
-      fetchMessages(); // now uses ref — no stale closure
+    socket.current.on("new_message", (data: any) => {
+      fetchMessages(); // now uses ref - no stale closure
+      fetchData();
+
+      const senderId = data?.senderId ? String(data.senderId) : "";
+      if (senderId && senderId !== String(getCurrentUserId())) {
+        playNotificationSound();
+      }
+      const currentChatId = String(activeChatRef.current?.userId || activeChatRef.current?._id || "");
+      const isActiveDm = chatTypeRef.current === "dm" && senderId && senderId === currentChatId;
+      if (senderId && !isActiveDm && senderId !== String(getCurrentUserId())) {
+        incrementUnreadForUser(senderId);
+      }
+    });
+
+    socket.current.on("presence_update", (data: any) => {
+      const userId = String(data?.userId || "");
+      const status = data?.status;
+      if (!userId || (status !== "online" && status !== "offline")) return;
+      setPresenceByUser((prev) => {
+        const current = prev[userId];
+        if (current === "leave" && status === "online") {
+          return prev;
+        }
+        if (current === status) return prev;
+        return { ...prev, [userId]: status };
+      });
+    });
+
+    socket.current.on("user_typing", (data: any) => {
+      if (chatTypeRef.current !== "dm") return;
+      const currentChatId = activeChatRef.current?.userId || activeChatRef.current?._id;
+      if (!currentChatId) return;
+      const senderId = data?.senderId;
+      if (!senderId || String(senderId) !== String(currentChatId)) return;
+      setTypingUserName(data?.senderName || activeChatRef.current?.name || "");
+      setIsPeerTyping(true);
+      if (typingIndicatorTimeoutRef.current) {
+        clearTimeout(typingIndicatorTimeoutRef.current);
+      }
+      typingIndicatorTimeoutRef.current = setTimeout(() => {
+        setIsPeerTyping(false);
+      }, 2800);
+    });
+
+    socket.current.on("user_stop_typing", (data: any) => {
+      if (chatTypeRef.current !== "dm") return;
+      const currentChatId = activeChatRef.current?.userId || activeChatRef.current?._id;
+      if (!currentChatId) return;
+      const senderId = data?.senderId;
+      if (!senderId || String(senderId) !== String(currentChatId)) return;
+      stopPeerTypingIndicator();
     });
 
     socket.current.on("incoming_call", (data: any) => {
@@ -147,13 +373,22 @@ export default function EmployeeChatPage() {
       clearInterval(interval);
       socket.current?.off("connect", joinSelfRoom);
       socket.current?.off("new_message");
+      socket.current?.off("presence_update");
+      socket.current?.off("user_typing");
+      socket.current?.off("user_stop_typing");
       socket.current?.off("incoming_call");
       socket.current?.off("call_accepted");
       socket.current?.off("ice_candidate");
       socket.current?.off("call_status_update");
       socket.current?.off("call_ended");
+      if (typingPauseTimeoutRef.current) {
+        clearTimeout(typingPauseTimeoutRef.current);
+        typingPauseTimeoutRef.current = null;
+      }
+      emitStopTyping();
+      stopPeerTypingIndicator();
     };
-  }, [user, fetchData, fetchMessages]);
+  }, [user, fetchData, fetchMessages, emitStopTyping, stopPeerTypingIndicator, incrementUnreadForUser, getCurrentUserId]);
 
   useEffect(() => {
     if (activeChat) {
@@ -164,12 +399,31 @@ export default function EmployeeChatPage() {
   }, [activeChat, chatType]);
 
   useEffect(() => {
+    if (chatType !== "dm" || !activeChat) return;
+    const chatUserId = String(activeChat.userId || activeChat._id || "");
+    if (chatUserId) {
+      clearUnreadForUser(chatUserId);
+    }
+  }, [activeChat, chatType, clearUnreadForUser]);
+
+  useEffect(() => {
+    stopPeerTypingIndicator();
+    return () => {
+      emitStopTyping(activeChat);
+    };
+  }, [activeChat, chatType, emitStopTyping, stopPeerTypingIndicator]);
+
+  useEffect(() => {
     if (localVideoRef.current && localStream) localVideoRef.current.srcObject = localStream;
   }, [localStream]);
 
   useEffect(() => {
     if (remoteVideoRef.current && remoteStream) remoteVideoRef.current.srcObject = remoteStream;
   }, [remoteStream]);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [messages, isPeerTyping]);
 
   useEffect(() => {
     if (callStatus !== "active" || !callStartedAt) {
@@ -182,9 +436,34 @@ export default function EmployeeChatPage() {
     return () => clearInterval(timer);
   }, [callStatus, callStartedAt]);
 
+  useEffect(() => {
+    if (callStatus === "calling" || callStatus === "incoming") {
+      if (!stopRingtoneRef.current) {
+        stopRingtoneRef.current = startCallRingtone();
+      }
+    } else if (stopRingtoneRef.current) {
+      stopRingtoneRef.current();
+      stopRingtoneRef.current = null;
+    }
+  }, [callStatus]);
+
+  useEffect(() => {
+    return () => {
+      if (stopRingtoneRef.current) {
+        stopRingtoneRef.current();
+        stopRingtoneRef.current = null;
+      }
+    };
+  }, []);
+
   const sendMessage = async () => {
     if (!newMessage.trim() || !activeChat || sending) return;
     const messageText = newMessage.trim();
+    emitStopTyping(activeChat);
+    if (typingPauseTimeoutRef.current) {
+      clearTimeout(typingPauseTimeoutRef.current);
+      typingPauseTimeoutRef.current = null;
+    }
     setNewMessage("");
     setSending(true);
     try {
@@ -194,6 +473,7 @@ export default function EmployeeChatPage() {
         await chatAPI.sendMessage({ receiverId, message: messageText });
         socket.current?.emit("send_message", {
           receiverId,
+          senderId: getCurrentUserId(),
           senderName: user?.name,
           message: messageText,
           timestamp: new Date().toISOString(),
@@ -330,6 +610,12 @@ export default function EmployeeChatPage() {
 
   return (
     <div style={{ height: "calc(100vh - 64px)", display: "flex", gap: 0 }}>
+      <style>{`
+        @keyframes typing-dot {
+          0%, 80%, 100% { transform: translateY(0); opacity: 0.35; }
+          40% { transform: translateY(-4px); opacity: 1; }
+        }
+      `}</style>
       {/* Left Panel */}
       <div style={{ width: 320, minWidth: 320, borderRight: "1px solid var(--border-color)", display: "flex", flexDirection: "column", background: "rgba(15,15,26,0.5)", borderRadius: "16px 0 0 16px", overflow: "hidden" }}>
         <div style={{ padding: "20px 16px", borderBottom: "1px solid var(--border-color)" }}>
@@ -350,15 +636,41 @@ export default function EmployeeChatPage() {
             conversations.length === 0 ? (
               <p style={{ textAlign: "center", padding: 24, color: "var(--text-muted)", fontSize: 13 }}>No conversations yet. Start a new chat!</p>
             ) : (
-              conversations.map((conv) => (
-                <button key={conv.userId} onClick={() => { setActiveChat(conv); setChatType("dm"); }} style={{ width: "100%", padding: "12px", display: "flex", alignItems: "center", gap: 12, border: "none", borderRadius: 10, cursor: "pointer", marginBottom: 4, background: activeChat?.userId === conv.userId ? "rgba(99,102,241,0.12)" : "transparent", textAlign: "left" }}>
-                  <div style={{ width: 40, height: 40, borderRadius: 10, background: "linear-gradient(135deg, #6366f1, #8b5cf6)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14, fontWeight: 700, color: "white", flexShrink: 0 }}>{conv.name?.slice(0, 2).toUpperCase()}</div>
+              conversations.map((conv) => {
+                const unread = unreadCounts[String(conv.userId)] || 0;
+                const presence = getPresenceMeta(String(conv.userId));
+                const isActive = activeChat?.userId === conv.userId;
+                const myId = user?.id || (user as any)?._id || getMyId();
+                const isLastMsgFromOther = conv.lastSenderId && conv.lastSenderId !== myId;
+                return (
+                <button key={conv.userId} onClick={() => { setActiveChat(conv); setChatType("dm"); }} style={{ width: "100%", padding: "12px", display: "flex", alignItems: "center", gap: 12, border: "none", borderRadius: 10, cursor: "pointer", marginBottom: 4, background: isActive ? "rgba(99,102,241,0.12)" : "transparent", textAlign: "left", transition: "background 0.15s" }}>
+                  {/* Avatar with presence dot */}
+                  <div style={{ position: "relative", flexShrink: 0 }}>
+                    <div style={{ width: 48, height: 48, borderRadius: 12, background: "linear-gradient(135deg, #6366f1, #8b5cf6)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, fontWeight: 700, color: "white" }}>{conv.name?.slice(0, 2).toUpperCase()}</div>
+                    <span style={{ position: "absolute", bottom: -1, right: -1, width: 12, height: 12, borderRadius: "50%", background: presence.color, border: "2px solid rgba(15,15,26,0.9)", boxShadow: `0 0 6px ${presence.color}` }} />
+                  </div>
+                  {/* Name + last message */}
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <p style={{ fontWeight: 600, fontSize: 14, color: "var(--text-primary)" }}>{conv.name}</p>
-                    <p style={{ fontSize: 12, color: "var(--text-muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{conv.lastMessage}</p>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 2 }}>
+                      <p style={{ fontWeight: unread > 0 ? 700 : 600, fontSize: 14, color: "var(--text-primary)", overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }}>{conv.name}</p>
+                      <span style={{ fontSize: 11, color: unread > 0 ? "#22c55e" : "var(--text-muted)", flexShrink: 0, marginLeft: 8, fontWeight: unread > 0 ? 600 : 400 }}>
+                        {conv.lastTimestamp ? formatChatTime(conv.lastTimestamp) : ""}
+                      </span>
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <p style={{ fontSize: 12.5, color: unread > 0 ? "var(--text-secondary)" : "var(--text-muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", fontWeight: unread > 0 ? 600 : 400, maxWidth: unread > 0 ? "calc(100% - 36px)" : "100%" }}>
+                        {!isLastMsgFromOther && conv.lastMessage ? <><FiCheck size={12} style={{ display: "inline", marginRight: 3, verticalAlign: "middle", color: "#818cf8" }} /></> : null}
+                        {conv.lastMessage || "Start chatting..."}
+                      </p>
+                      {unread > 0 && (
+                        <div style={{ minWidth: 20, height: 20, padding: "0 6px", borderRadius: 999, background: "#25d366", color: "white", fontSize: 11, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, marginLeft: 6 }}>
+                          {unread > 99 ? "99+" : unread}
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </button>
-              ))
+              )})
             )
           ) : (
             groups.length === 0 ? (
@@ -389,7 +701,16 @@ export default function EmployeeChatPage() {
                 </div>
                 <div>
                   <p style={{ fontWeight: 600, fontSize: 15 }}>{activeChat.name}</p>
-                  <p style={{ fontSize: 12, color: "var(--text-muted)" }}>{chatType === "dm" ? "Direct Message" : `${activeChat.members?.length || 0} members`}</p>
+                  <p style={{ fontSize: 12, color: "var(--text-muted)", display: "flex", alignItems: "center", gap: 6 }}>
+                    {chatType === "dm" ? (
+                      <>
+                        <span style={{ width: 8, height: 8, borderRadius: "50%", background: getPresenceMeta(String(activeChat.userId || activeChat._id)).color, boxShadow: `0 0 8px ${getPresenceMeta(String(activeChat.userId || activeChat._id)).color}` }} />
+                        {getPresenceMeta(String(activeChat.userId || activeChat._id)).label}
+                      </>
+                    ) : (
+                      `${activeChat.members?.length || 0} members`
+                    )}
+                  </p>
                 </div>
               </div>
               <div style={{ display: "flex", gap: 8 }}>
@@ -426,24 +747,75 @@ export default function EmployeeChatPage() {
                   const isMe = msg.senderId === user?.id ||
                                msg.senderId === (user as any)?._id ||
                                msg.senderName === user?.name;
+
+                  // Tick status for sent messages (DM only)
+                  let tickStatus: "sent" | "delivered" | "read" = "sent";
+                  if (isMe && chatType === "dm" && msg.timestamp) {
+                    const recipientId = activeChatRef.current?.userId || activeChatRef.current?._id;
+                    const isOtherOnline = presenceByUser[recipientId] === "online";
+                    
+                    if (otherReadTimestamp && msg.timestamp <= otherReadTimestamp) {
+                      tickStatus = "read";
+                    } else if (isOtherOnline) {
+                      tickStatus = "delivered";
+                    } else {
+                      tickStatus = "sent";
+                    }
+                  }
+
                   return (
                     <div key={msg._id} style={{ display: "flex", flexDirection: "column", alignItems: isMe ? "flex-end" : "flex-start" }}>
                       {!isMe && chatType === "group" && (
                         <p style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 2, paddingLeft: 4 }}>{msg.senderName}</p>
                       )}
-                      <div className={`chat-bubble ${isMe ? "chat-bubble-sent" : "chat-bubble-received"}`}>{msg.message}</div>
-                      <p style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 2, padding: "0 4px" }}>
+                      <div className={`chat-bubble ${isMe ? "chat-bubble-sent" : "chat-bubble-received"}`}>
+                        <span>{msg.message}</span>
+                        {isMe && chatType === "dm" && (
+                          <span style={{ display: "inline-flex", alignItems: "center", marginLeft: 6, verticalAlign: "bottom", position: "relative", top: 2 }}>
+                            {tickStatus === "read" ? (
+                              /* Double blue ticks */
+                              <span style={{ display: "inline-flex", alignItems: "center" }}>
+                                <FiCheck size={13} style={{ color: "#53bdeb", strokeWidth: 3 }} />
+                                <FiCheck size={13} style={{ color: "#53bdeb", strokeWidth: 3, marginLeft: -8 }} />
+                              </span>
+                            ) : tickStatus === "delivered" ? (
+                              /* Double grey ticks */
+                              <span style={{ display: "inline-flex", alignItems: "center" }}>
+                                <FiCheck size={13} style={{ color: "rgba(255,255,255,0.5)", strokeWidth: 3 }} />
+                                <FiCheck size={13} style={{ color: "rgba(255,255,255,0.5)", strokeWidth: 3, marginLeft: -8 }} />
+                              </span>
+                            ) : (
+                              /* Single grey tick */
+                              <FiCheck size={13} style={{ color: "rgba(255,255,255,0.5)", strokeWidth: 3 }} />
+                            )}
+                          </span>
+                        )}
+                      </div>
+                      <p style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 2, padding: "0 4px", display: "flex", alignItems: "center", gap: 3 }}>
                         {new Date(msg.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
                       </p>
                     </div>
                   );
                 })
               )}
+              {chatType === "dm" && isPeerTyping && (
+                <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-start" }}>
+                  <div
+                    className="chat-bubble chat-bubble-received"
+                    style={{ display: "inline-flex", alignItems: "center", gap: 4, minWidth: 52 }}
+                    aria-label={`${typingUserName || activeChat?.name || "User"} is typing`}
+                  >
+                    <span style={{ width: 7, height: 7, borderRadius: "50%", background: "rgba(255,255,255,0.88)", animation: "typing-dot 1s ease-in-out 0s infinite" }} />
+                    <span style={{ width: 7, height: 7, borderRadius: "50%", background: "rgba(255,255,255,0.88)", animation: "typing-dot 1s ease-in-out 0.2s infinite" }} />
+                    <span style={{ width: 7, height: 7, borderRadius: "50%", background: "rgba(255,255,255,0.88)", animation: "typing-dot 1s ease-in-out 0.4s infinite" }} />
+                  </div>
+                </div>
+              )}
               <div ref={messagesEndRef} />
             </div>
 
             <div style={{ padding: "16px 20px", borderTop: "1px solid var(--border-color)", display: "flex", gap: 12 }}>
-              <input className="input-field" value={newMessage} onChange={(e) => setNewMessage(e.target.value)} onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && sendMessage()} placeholder="Type a message..." style={{ flex: 1 }} disabled={sending} />
+              <input className="input-field" value={newMessage} onChange={(e) => handleMessageInputChange(e.target.value)} onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && sendMessage()} placeholder="Type a message..." style={{ flex: 1 }} disabled={sending} />
               <button onClick={sendMessage} className="gradient-btn" style={{ padding: "10px 20px", opacity: sending ? 0.6 : 1 }} disabled={!newMessage.trim() || sending}><FiSend size={18} /></button>
             </div>
           </>
@@ -572,16 +944,18 @@ export default function EmployeeChatPage() {
                       <p style={{ color: "white", fontSize: 14 }}>{remoteStream ? "Voice connected" : `Connecting to ${activeChat?.name || caller?.name}...`}</p>
                     </div>
                   )}
-                  <div style={{ position: "absolute", bottom: 16, right: 16, width: 220, height: 140, background: "#202124", borderRadius: 14, overflow: "hidden", border: "1px solid rgba(255,255,255,0.28)" }}>
-                    {callType === "video" && !isCameraOff ? (
-                      <video ref={localVideoRef} autoPlay muted playsInline style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-                    ) : (
-                      <div style={{ width: "100%", height: "100%", display: "flex", flexDirection: "column", gap: 8, alignItems: "center", justifyContent: "center", color: "rgba(255,255,255,0.8)" }}>
-                        <FiVideoOff size={22} />
-                        <span style={{ fontSize: 12 }}>Camera off</span>
-                      </div>
-                    )}
-                  </div>
+                  {callType === "video" && (
+                    <div style={{ position: "absolute", bottom: 16, right: 16, width: 220, height: 140, background: "#202124", borderRadius: 14, overflow: "hidden", border: "1px solid rgba(255,255,255,0.28)" }}>
+                      {!isCameraOff ? (
+                        <video ref={localVideoRef} autoPlay muted playsInline style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                      ) : (
+                        <div style={{ width: "100%", height: "100%", display: "flex", flexDirection: "column", gap: 8, alignItems: "center", justifyContent: "center", color: "rgba(255,255,255,0.8)" }}>
+                          <FiVideoOff size={22} />
+                          <span style={{ fontSize: 12 }}>Camera off</span>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
                 <div style={{ paddingBottom: 6, display: "flex", justifyContent: "center", gap: 14 }}>
                   <button
@@ -603,6 +977,7 @@ export default function EmployeeChatPage() {
     </div>
   );
 }
+
 
 
 

@@ -7,7 +7,9 @@ from routes_attendance import router as attendance_router
 from routes_leaves import router as leaves_router
 from routes_chat import router as chat_router
 from routes_notifications import router as notifications_router
+from routes_frs import router as frs_router
 import socketio
+from presence_state import is_user_online, mark_user_offline_by_sid, mark_user_online
 
 # ─── Allowed Origins ──────────────────────────────────────
 ALLOWED_ORIGINS = [
@@ -52,6 +54,7 @@ app.include_router(attendance_router)
 app.include_router(leaves_router)
 app.include_router(chat_router)
 app.include_router(notifications_router)
+app.include_router(frs_router)
 
 # ─── Health Check ─────────────────────────────────────────
 @app.get("/")
@@ -66,11 +69,14 @@ async def health():
 # ─── Socket.IO Events ────────────────────────────────────
 @sio.on("connect")
 async def connect(sid, environ):
-    print(f"🔌 Client connected: {sid}")
+    print(f"SOCKET Client connected: {sid}")
 
 @sio.on("disconnect")
 async def disconnect(sid):
-    print(f"🔌 Client disconnected: {sid}")
+    print(f"SOCKET Client disconnected: {sid}")
+    user_id = mark_user_offline_by_sid(sid)
+    if user_id and not is_user_online(user_id):
+        await sio.emit("presence_update", {"userId": str(user_id), "status": "offline"})
 
 @sio.on("join_room")
 async def join_room(sid, data):
@@ -79,6 +85,9 @@ async def join_room(sid, data):
         room = str(room)
         await sio.enter_room(sid, room)
         await sio.emit("room_joined", {"room": room}, room=sid)
+        if data.get("self"):
+            mark_user_online(sid, room)
+            await sio.emit("presence_update", {"userId": room, "status": "online"})
 
 @sio.on("leave_room")
 async def leave_room(sid, data):
@@ -99,6 +108,20 @@ async def handle_typing(sid, data):
     room = data.get("room")
     if room:
         await sio.emit("user_typing", data, room=room, skip_sid=sid)
+        return
+    receiver_id = data.get("receiverId")
+    if receiver_id:
+        await sio.emit("user_typing", data, room=str(receiver_id))
+
+@sio.on("stop_typing")
+async def handle_stop_typing(sid, data):
+    room = data.get("room")
+    if room:
+        await sio.emit("user_stop_typing", data, room=room, skip_sid=sid)
+        return
+    receiver_id = data.get("receiverId")
+    if receiver_id:
+        await sio.emit("user_stop_typing", data, room=str(receiver_id))
 
 # ─── WebRTC Signaling ────────────────────────────────────
 @sio.on("call_user")
@@ -139,3 +162,5 @@ socket_app = socketio.ASGIApp(sio, app)
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:socket_app", host="0.0.0.0", port=8000, reload=True)
+
+

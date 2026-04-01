@@ -101,6 +101,8 @@ export const chatAPI = {
   sendMessage: (data: any) => api.post('/api/chat/messages', data),
   getMessages: (userId: string) => api.get(`/api/chat/messages/${userId}`),
   getConversations: () => api.get('/api/chat/conversations'),
+  markRead: (userId: string) => api.post(`/api/chat/mark-read/${userId}`),
+  getUnreadCounts: () => api.get('/api/chat/unread-counts'),
   createGroup: (data: any) => api.post('/api/chat/groups', data),
   getMyGroups: () => api.get('/api/chat/groups'),
   getAllGroups: () => api.get('/api/chat/groups/all'),
@@ -111,9 +113,33 @@ export const chatAPI = {
   addGroupMember: (groupId: string, memberId: string) =>
     api.put(`/api/chat/groups/${groupId}/members?member_id=${memberId}`),
   getAdminStats: () => api.get('/api/chat/admin/stats'),
+  getPresence: (userIds: string[]) =>
+    api.get('/api/chat/presence', { params: { user_ids: userIds.join(",") } }),
 };
 
 // ─── Notifications API ───────────────────────────────────
 export const notificationsAPI = {
   getMyNotifications: () => api.get('/api/notifications/'),
+};
+
+// ─── FRS (Face Recognition) API ──────────────────────────
+export const frsAPI = {
+  recognize: (imageBlob: Blob) => {
+    const formData = new FormData();
+    formData.append('file', imageBlob, 'face.jpg');
+    return api.post('/api/frs/recognize', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+  },
+  register: (userId: string, imageBlob: Blob) => {
+    const formData = new FormData();
+    formData.append('user_id', userId);
+    formData.append('file', imageBlob, 'face.jpg');
+    return api.post('/api/frs/register', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+  },
+  getStatus: () => api.get('/api/frs/status'),
+  getRegisteredCount: () => api.get('/api/frs/registered-count'),
+  unregister: (userId: string) => api.delete(`/api/frs/unregister/${userId}`),
 };

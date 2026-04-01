@@ -7,6 +7,7 @@ import { usePathname } from "next/navigation";
 import socketService from "@/lib/socket";
 import toast from "react-hot-toast";
 import { FiUser } from "react-icons/fi";
+import { playNotificationSound } from "@/lib/sounds";
 
 export default function EmployeeLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter();
@@ -33,10 +34,11 @@ export default function EmployeeLayout({ children }: { children: React.ReactNode
     const socket = socketService.connect();
     const myId = user?.id || (user as { _id?: string } | null)?._id;
     const joinSelfRoom = () => {
-      if (myId) socket?.emit("join_room", { room: myId });
+      if (myId) socket?.emit("join_room", { room: myId, self: true });
     };
     const onNewMessage = (data: { senderName?: string; message?: string }) => {
       if (pathname.startsWith("/employee/chat")) return;
+      playNotificationSound();
       const sender = data?.senderName || "New Message";
       const message = data?.message || "You received a message";
       toast.custom(
