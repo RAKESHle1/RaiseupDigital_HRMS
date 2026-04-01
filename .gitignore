@@ -10,7 +10,11 @@ __pycache__/
 *.pyc
 venv/
 .venv/
-.env
+Backend/.env
+Backend/face_images/
+Backend/face_encodings.p
+Backend/*.log
+Backend/temp_*.jpg
 
 # OS
 .DS_Store

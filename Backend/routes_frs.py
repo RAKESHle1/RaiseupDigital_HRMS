@@ -10,51 +10,47 @@ import pickle
 import os
 import io
 import tempfile
+import base64
 from PIL import Image
 from starlette.concurrency import run_in_threadpool
 import asyncio
 
 router = APIRouter(prefix="/api/frs", tags=["Face Recognition"])
 
-# ─── Face Encoding Storage ────────────────────────────────
-# Local directory for temporary storage/backups
-FACE_IMAGES_DIR = os.path.join(os.path.dirname(__file__), "face_images")
-os.makedirs(FACE_IMAGES_DIR, exist_ok=True)
-
+# ─── Face Encoding Cache ────────────────────────────────
 # In-memory face encodings cache for fast lookups
 face_encodings_list = []
 face_user_ids = []
 
 async def load_encodings_from_db():
-    """
-    Load all registered face encodings from MongoDB into memory.
-    This ensures that even if the server restarts (e.g. on Render), 
-    the face recognition system remains functional.
-    """
     global face_encodings_list, face_user_ids
     try:
         cursor = face_encodings_collection.find({})
-        db_encodings = await cursor.to_list(length=10000)
+        db_encodings = await cursor.to_list(length=None)
         
         face_encodings_list = []
         face_user_ids = []
         
         for doc in db_encodings:
             user_id = doc["user_id"]
+            # Encodings are stored as lists in Mongo, convert back to numpy
             encoding = np.array(doc["encoding"], dtype=np.float64)
             face_encodings_list.append(encoding)
             face_user_ids.append(user_id)
             
-        print(f"FRS: Loaded {len(face_user_ids)} face encodings from MongoDB.")
+        print(f"FRS Production: Sync complete. {len(face_user_ids)} encodings loaded into memory.")
     except Exception as e:
-        print(f"FRS: Error loading encodings from MongoDB: {e}")
+        print(f"FRS WARNING: Could not sync with MongoDB: {e}")
 
-# Initial load task
 @router.on_event("startup")
 async def startup_event():
     await load_encodings_from_db()
 
 def _prepare_image_for_dlib(data: bytes):
+    """
+    State-of-the-art image loading for dlib/face_recognition.
+    Works by writing to a secure temporary file first.
+    """
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
             tmp.write(data)
@@ -62,14 +58,14 @@ def _prepare_image_for_dlib(data: bytes):
         
         try:
             image = face_recognition.load_image_file(tmp_path)
+            # Ensure RGB
             if len(image.shape) == 3 and image.shape[2] == 4:
                 image = image[:, :, :3]
-            image = np.ascontiguousarray(image, dtype=np.uint8)
-            return image
+            return np.ascontiguousarray(image, dtype=np.uint8)
         finally:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
+            if os.path.exists(tmp_path): os.remove(tmp_path)
     except Exception as e:
+        print(f"ERROR Preparing image: {e}")
         return None
 
 def _process_recognition(contents: bytes):
@@ -77,30 +73,30 @@ def _process_recognition(contents: bytes):
         rgb_img = _prepare_image_for_dlib(contents)
         if rgb_img is None: return {"error": "Invalid image data"}
 
-        # Resize for faster identification
+        # Resize for performance optimization
         imgS = cv2.resize(rgb_img, (0, 0), None, 0.25, 0.25)
         imgS = np.ascontiguousarray(imgS, dtype=np.uint8)
 
         face_locations = face_recognition.face_locations(imgS)
         face_encs = face_recognition.face_encodings(imgS, face_locations)
 
-        if len(face_encs) == 0: return {"error": "No face detected"}
-        if len(face_encodings_list) == 0: return {"error": "No registered faces"}
+        if len(face_encs) == 0: return {"error": "No face detected in scan"}
+        if len(face_encodings_list) == 0: return {"error": "No registrations exist yet"}
 
-        # Match against known faces
+        # Perform the actual identification
         encode_face = face_encs[0]
         face_distances = face_recognition.face_distance(face_encodings_list, encode_face)
         match_index = np.argmin(face_distances)
 
-        if face_distances[match_index] > 0.5:
-            return {"error": "Unrecognized face"}
+        if face_distances[match_index] > 0.5: # 0.5 is strict threshold
+            return {"error": "Face not recognized. Contact admin."}
 
         matched_user_id = face_user_ids[match_index]
         confidence = round((1 - float(face_distances[match_index])) * 100, 1)
         
         return {"matched_user_id": matched_user_id, "confidence": confidence}
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": f"Internal Recognition Error: {str(e)}"}
 
 
 @router.post("/recognize")
@@ -113,7 +109,7 @@ async def recognize_face(file: UploadFile = File(...)):
 
         matched_user_id = res["matched_user_id"]
         user = await users_collection.find_one({"_id": ObjectId(matched_user_id)})
-        if not user: raise HTTPException(status_code=404, detail="User accounts out of sync")
+        if not user: raise HTTPException(status_code=404, detail="Employee record not found")
 
         today = date.today().isoformat()
         now_time = datetime.now().strftime("%H:%M")
@@ -145,7 +141,7 @@ async def recognize_face(file: UploadFile = File(...)):
 
         return {
             "status": "success", "action": action,
-            "employee": {"name": user["name"], "id": matched_user_id},
+            "employee": {"name": user["name"], "id": matched_user_id, "employeeId": user.get("employeeId", "")},
             "time": now_time, "confidence": res["confidence"], "workingHours": working_hours
         }
     except HTTPException as e: raise e
@@ -171,18 +167,16 @@ async def register_face(
 
         new_encoding = await run_in_threadpool(_get_encoding, contents)
         if new_encoding is None:
-            raise HTTPException(status_code=400, detail="No face detected. Please capture a clear face photo.")
+            raise HTTPException(status_code=400, detail="No face detected. Capture again.")
 
-        # Persist to MongoDB (Stateless)
-        # Convert numpy array to list for storage
-        encoding_list = new_encoding.tolist()
+        # Persist encoding to MongoDB (Stateless)
         await face_encodings_collection.update_one(
             {"user_id": user_id},
-            {"$set": {"user_id": user_id, "encoding": encoding_list, "updated_at": datetime.now()}},
+            {"$set": {"user_id": user_id, "encoding": new_encoding.tolist(), "updated_at": datetime.now()}},
             upsert=True
         )
 
-        # Update local memory cache
+        # Update local memory
         if user_id in face_user_ids:
             idx = face_user_ids.index(user_id)
             face_encodings_list[idx] = new_encoding
@@ -190,8 +184,16 @@ async def register_face(
             face_encodings_list.append(new_encoding)
             face_user_ids.append(user_id)
 
-        await users_collection.update_one({"_id": ObjectId(user_id)}, {"$set": {"faceRegistered": True}})
-        return {"status": "success", "message": "Face registered successfully and saved to DB"}
+        # Persist face image as Base64 in users collection (for persistence in cloud)
+        # Using a small, decent quality JPG string
+        img_b64 = f"data:image/jpeg;base64,{base64.b64encode(contents).decode('utf-8')}"
+        
+        await users_collection.update_one(
+            {"_id": ObjectId(user_id)}, 
+            {"$set": {"faceRegistered": True, "faceCapture": img_b64}}
+        )
+        
+        return {"status": "success", "message": "Face registration fully persisted in database"}
     except Exception as e:
         if isinstance(e, HTTPException): raise e
         raise HTTPException(status_code=500, detail=str(e))
@@ -200,16 +202,17 @@ async def register_face(
 async def unregister_face(user_id: str, admin: dict = Depends(get_admin_user)):
     global face_encodings_list, face_user_ids
     
-    # Remove from MongoDB
     await face_encodings_collection.delete_one({"user_id": user_id})
     
-    # Remove from cache
     if user_id in face_user_ids:
         idx = face_user_ids.index(user_id)
         face_encodings_list.pop(idx); face_user_ids.pop(idx)
     
-    await users_collection.update_one({"_id": ObjectId(user_id)}, {"$set": {"faceRegistered": False}})
-    return {"message": "Face unregistered"}
+    await users_collection.update_one(
+        {"_id": ObjectId(user_id)}, 
+        {"$set": {"faceRegistered": False}, "$unset": {"faceCapture": ""}}
+    )
+    return {"message": "Face data wiped"}
 
 @router.get("/status")
 async def frs_status(current_user: dict = Depends(get_current_user)):
@@ -217,4 +220,4 @@ async def frs_status(current_user: dict = Depends(get_current_user)):
 
 @router.get("/registered-count")
 async def registered_count(admin: dict = Depends(get_admin_user)):
-    return {"total": len(face_user_ids), "userIds": face_user_ids}
+    return {"total": len(face_user_ids)}
