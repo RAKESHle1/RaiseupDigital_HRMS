@@ -4,12 +4,15 @@ FROM continuumio/miniconda3:latest
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE 1
 ENV PYTHONUNBUFFERED 1
+# Add conda to the global search path
+ENV PATH /opt/conda/bin:$PATH
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
     libgl1 \
     libglib2.0-0 \
     git \
+    build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 # Set work directory
@@ -21,17 +24,16 @@ RUN conda install -c conda-forge -y \
     dlib \
     && conda clean -afy
 
-# FORCE install Face Recognition and its Models into the EXACT conda environment
-# We use the full path to conda's pip to be 100% sure
-RUN /opt/conda/bin/pip install --no-cache-dir face-recognition
-RUN /opt/conda/bin/pip install --no-cache-dir git+https://github.com/ageitgey/face_recognition_models
+# Install AI Core and Models in a single unified step
+# This ensures all dependencies are linked correctly in the path
+RUN pip install --no-cache-dir face-recognition face-recognition-models git+https://github.com/ageitgey/face_recognition_models
 
 # Install remaining backend dependencies
 COPY requirements.txt .
-RUN /opt/conda/bin/pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy project
 COPY . .
 
-# Start the application using the full path to uvicorn
-CMD /opt/conda/bin/uvicorn main:socket_app --host 0.0.0.0 --port $PORT
+# Start the application - we explicitly use uvicorn from the path
+CMD uvicorn main:socket_app --host 0.0.0.0 --port $PORT
