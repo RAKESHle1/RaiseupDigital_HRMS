@@ -18,15 +18,12 @@ RUN apt-get update && apt-get install -y \
 # Set work directory
 WORKDIR /app
 
-# Install the heavy dlib binary via Conda
+# Install the heavy AI binaries via Conda (dlib and face_recognition)
 RUN conda install -c conda-forge -y \
     python=3.10 \
     dlib \
+    face_recognition \
     && conda clean -afy
-
-# Install AI Core and Models in a single unified step
-# This ensures all dependencies are linked correctly in the path
-RUN pip install --no-cache-dir face-recognition face-recognition-models git+https://github.com/ageitgey/face_recognition_models
 
 # Install remaining backend dependencies
 COPY requirements.txt .
