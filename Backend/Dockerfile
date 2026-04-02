@@ -25,6 +25,11 @@ RUN conda install -c conda-forge -y \
     face_recognition \
     && conda clean -afy
 
+# explicitly install setuptools (for pkg_resources) and face_recognition_models via pip
+# this is because face_recognition's internal import catches ANY exception (including missing setuptools)
+# and mistakenly says 'face_recognition_models' is not found.
+RUN pip install --no-cache-dir setuptools face-recognition-models
+
 # Install remaining backend dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
